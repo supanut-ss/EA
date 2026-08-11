@@ -14,3 +14,12 @@ export function formatPrice(value: number): string {
     maximumFractionDigits: 2,
   });
 }
+
+export function formatRelativeTimeThai(isoTimestamp: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
+  if (seconds < 60) return `${seconds} วินาทีที่แล้ว`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} นาทีที่แล้ว`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} ชั่วโมงที่แล้ว`;
+}

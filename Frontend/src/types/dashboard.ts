@@ -80,9 +80,9 @@ export interface RiskSnapshot {
 
 export interface DashboardSnapshot {
   connection: ConnectionState;
+  /** ISO timestamp ดิบจาก server — frontend เป็นคนคำนวณ "กี่วินาทีที่แล้ว" เอง */
   lastSyncedAt: string;
   brokerTime: string;
-  localTime: string;
   account: AccountSummary;
   equityCurve: EquityPoint[];
   openPositions: Position[];

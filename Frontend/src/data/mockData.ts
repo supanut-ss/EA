@@ -1,13 +1,13 @@
 import type { DashboardSnapshot } from "../types/dashboard";
 
-// ข้อมูลตัวอย่างสำหรับ dev/scaffold เท่านั้น — จะถูกแทนที่ด้วยข้อมูลจริงจาก
-// backend (C# API อ่านจาก SQL ที่ EA เขียนเข้ามา) ผ่าน useDashboardData
+// Fallback ตอนต่อ backend จริงไม่ได้ (เช่น backend ยังไม่รัน หรือ dev แบบ
+// offline) — useDashboardData ใช้ก้อนนี้เป็น last resort เท่านั้น ไม่ใช่ทางหลัก
+// อีกต่อไป ทางหลักคือ fetch ไป /api/dashboard/snapshot จริง
 export function getMockSnapshot(): DashboardSnapshot {
   return {
     connection: "connected",
-    lastSyncedAt: "4 วินาทีที่แล้ว",
+    lastSyncedAt: new Date().toISOString(),
     brokerTime: "14:02:11 GMT+2",
-    localTime: "19:02:11 GMT+7",
     account: {
       balance: 5000,
       equity: 5142.3,

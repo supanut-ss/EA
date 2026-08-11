@@ -48,6 +48,12 @@ export default function App() {
     [data?.closedTrades],
   );
 
+  // ข้อความ empty state ต้องผูกกับสถานะจริงของ EA ที่เลือกอยู่ (ไม่ hardcode
+  // ชื่อ/id เดิมที่มาจาก mock data — id จริงจาก backend เป็นตัวเลข ไม่ใช่ "scalp")
+  const selectedEa = data?.eaStatuses.find((ea) => ea.id === eaFilter);
+  const notDeployedMessage =
+    selectedEa?.state === "not_deployed" ? `${selectedEa.name} ยังไม่ deploy — ไม่มีข้อมูล` : null;
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -74,7 +80,6 @@ export default function App() {
               connection={data.connection}
               lastSyncedAt={data.lastSyncedAt}
               brokerTime={data.brokerTime}
-              localTime={data.localTime}
               mode={mode}
               onToggleMode={toggleMode}
             />
@@ -103,20 +108,12 @@ export default function App() {
                   positions={data.openPositions}
                   connection={data.connection}
                   eaFilter={eaFilter}
-                  emptyMessage={
-                    eaFilter === "scalp"
-                      ? "Scalping ยังไม่ deploy — ไม่มีข้อมูล"
-                      : "ยังไม่มีไม้เปิดวันนี้"
-                  }
+                  emptyMessage={notDeployedMessage ?? "ยังไม่มีไม้เปิดวันนี้"}
                 />
                 <TradeHistoryCard
                   trades={data.closedTrades}
                   eaFilter={eaFilter}
-                  emptyMessage={
-                    eaFilter === "scalp"
-                      ? "Scalping ยังไม่ deploy — ไม่มีข้อมูล"
-                      : "ยังไม่มีประวัติการเทรดวันนี้"
-                  }
+                  emptyMessage={notDeployedMessage ?? "ยังไม่มีประวัติการเทรดวันนี้"}
                   winRatePct={stats.winRatePct}
                   profitFactor={stats.profitFactor}
                 />
@@ -130,7 +127,7 @@ export default function App() {
             </Box>
 
             <Typography variant="caption" color="text.disabled" textAlign="center">
-              EA Console · ข้อมูลตัวอย่างสำหรับ dev (mock data) — ยังไม่เชื่อมต่อ backend จริง
+              EA Console · อัปเดตข้อมูลอัตโนมัติทุก 10 วินาที
             </Typography>
           </Stack>
         ) : null}
