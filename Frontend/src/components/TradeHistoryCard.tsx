@@ -1,0 +1,139 @@
+import { useState } from "react";
+import Box from "@mui/material/Box";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import Chip from "@mui/material/Chip";
+import Stack from "@mui/material/Stack";
+import Tab from "@mui/material/Tab";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import Tabs from "@mui/material/Tabs";
+import Typography from "@mui/material/Typography";
+import type { ClosedTrade } from "../types/dashboard";
+import { numericSx } from "../theme";
+import { formatPrice, formatUsd } from "../utils/format";
+
+interface TradeHistoryCardProps {
+  trades: ClosedTrade[];
+  eaFilter: string;
+  emptyMessage: string;
+  winRatePct: number;
+  profitFactor: number;
+}
+
+const RANGE_LABELS = ["วันนี้", "7 วัน", "30 วัน"];
+
+export default function TradeHistoryCard({
+  trades,
+  eaFilter,
+  emptyMessage,
+  winRatePct,
+  profitFactor,
+}: TradeHistoryCardProps) {
+  // หมายเหตุ: ตอนนี้ทั้ง 3 แท็บใช้ข้อมูลชุดเดียวกัน (mock) — เมื่อต่อ backend จริง
+  // ให้ query ช่วงเวลาที่ต่างกันตาม range ที่เลือกแทน
+  const [range, setRange] = useState(0);
+  const filtered = eaFilter === "all" ? trades : trades.filter((t) => t.eaId === eaFilter);
+
+  return (
+    <Card>
+      <CardContent sx={{ pb: "8px !important" }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
+          <Typography variant="subtitle1" fontWeight={700}>
+            Trade History
+          </Typography>
+          <Typography variant="caption" color="text.disabled">
+            Win rate {winRatePct}% · PF {profitFactor}
+          </Typography>
+        </Stack>
+
+        <Tabs
+          value={range}
+          onChange={(_, v) => setRange(v)}
+          sx={{ minHeight: 36, mb: 1, borderBottom: 1, borderColor: "divider" }}
+        >
+          {RANGE_LABELS.map((label) => (
+            <Tab key={label} label={label} sx={{ minHeight: 36, textTransform: "none" }} />
+          ))}
+        </Tabs>
+
+        <TableContainer sx={{ overflowX: "auto" }}>
+          <Table size="small" sx={{ minWidth: 600 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell>EA</TableCell>
+                <TableCell>Symbol</TableCell>
+                <TableCell>Side</TableCell>
+                <TableCell align="right">Lot</TableCell>
+                <TableCell align="right">Open</TableCell>
+                <TableCell align="right">Close</TableCell>
+                <TableCell align="right">P/L</TableCell>
+                <TableCell>ปิดไม้ (Broker)</TableCell>
+                <TableCell>เหตุผล</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filtered.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={9} align="center" sx={{ py: 4, color: "text.disabled" }}>
+                    {emptyMessage}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                filtered.map((t) => (
+                  <TableRow key={t.id} hover>
+                    <TableCell>
+                      <Stack direction="row" alignItems="center" gap={0.75}>
+                        <Box
+                          sx={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: "50%",
+                            bgcolor: "primary.main",
+                          }}
+                        />
+                        <Typography variant="body2" color="text.secondary">
+                          {t.eaName}
+                        </Typography>
+                      </Stack>
+                    </TableCell>
+                    <TableCell>{t.symbol}</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={t.side}
+                        color={t.side === "BUY" ? "success" : "error"}
+                        sx={{ ...numericSx, fontWeight: 700, fontSize: 11.5 }}
+                      />
+                    </TableCell>
+                    <TableCell align="right" sx={numericSx}>
+                      {t.lot.toFixed(2)}
+                    </TableCell>
+                    <TableCell align="right" sx={numericSx}>
+                      {formatPrice(t.openPrice)}
+                    </TableCell>
+                    <TableCell align="right" sx={numericSx}>
+                      {formatPrice(t.closePrice)}
+                    </TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ ...numericSx, color: t.pnl >= 0 ? "success.main" : "error.main" }}
+                    >
+                      {formatUsd(t.pnl, true)}
+                    </TableCell>
+                    <TableCell sx={numericSx}>{t.closedAtBroker}</TableCell>
+                    <TableCell>{t.closeReason}</TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </CardContent>
+    </Card>
+  );
+}

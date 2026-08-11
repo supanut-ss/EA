@@ -1,0 +1,51 @@
+# ---------- Node / React (Frontend) ----------
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+*.local
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------- Env / secrets ----------
+.env
+.env.*.local
+.env.local
+
+# ---------- .NET / C# (Backend) ----------
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.pubxml
+*.pubxml.user
+publish/
+
+# ---------- SQL local data / dumps ----------
+*.mdf
+*.ldf
+*.ndf
+*.bak
+
+# ---------- MQL5 / MT5 (MQ5) ----------
+**/*.ex5
+**/*.ex4
+MQ5/Backtest/compile_log.txt
+MQ5/Backtest/*Report*.htm
+MQ5/Backtest/*.pass
+
+# ---------- Claude Code local settings ----------
+**/.claude/settings.local.json
+**/.claude/scheduled_tasks.lock
+
+# ---------- Editor / OS ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
