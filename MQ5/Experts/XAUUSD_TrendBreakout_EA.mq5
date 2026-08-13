@@ -29,6 +29,7 @@
 #property strict
 
 #include <Trade\Trade.mqh>
+#include <EaIngestClient.mqh>
 
 CTrade trade;
 
@@ -37,7 +38,7 @@ input group "=== General Settings ==="
 input double   InpLotSize          = 0.01;      // Fixed Lot Size
 input ulong    InpMagicNumber      = 20260811;  // Magic Number
 input int      InpSlippage         = 20;        // Slippage (points)
-input int      InpMaxOpenPositions = 3;         // Max Open Positions (this EA)
+input int      InpMaxOpenPositions = 4;         // Max Open Positions (this EA)
 input int      InpMaxTradesPerDay  = 6;         // Max New Trades Per Day
 
 input group "=== Trend Filter (Higher Timeframe) ==="
@@ -49,7 +50,7 @@ input double   InpAdxThreshold     = 20.0;      // ADX Minimum Threshold (trend 
 
 input group "=== Breakout Settings (Entry Timeframe) ==="
 input ENUM_TIMEFRAMES InpEntryTF   = PERIOD_M15; // Entry Timeframe
-input int      InpDonchianPeriod   = 10;         // Donchian Channel Period (bars)
+input int      InpDonchianPeriod   = 8;          // Donchian Channel Period (bars)
 input int      InpAtrPeriod        = 14;         // ATR Period
 input double   InpAtrBufferMult    = 0.30;       // ATR Buffer Multiplier (fakeout filter)
 
@@ -59,8 +60,39 @@ input double   InpRiskReward       = 1.8;        // Risk:Reward Ratio (TP distan
 input bool     InpUseTrailing      = true;       // Use ATR Trailing Stop
 input double   InpTrailAtrMult     = 1.2;        // Trailing Stop ATR Multiplier
 
+input group "=== Breakeven (profit lock) - TESTED AND REJECTED, default OFF ==="
+// Ported from EA #3 (which exits its stops at an average of +1.02 instead of this
+// EA's -3.34) on the theory that a profit lock was the missing piece. Backtested
+// 2026.01.01-08.13 and it made this EA WORSE, so it ships OFF:
+//   baseline      $223.07  DD 15.18%  PF 1.18
+//   breakeven on  $139.33  DD 14.85%  PF 1.11   <- costs 84 dollars of profit
+// Reason: this is a LOW win rate / HIGH payoff system (41% wins; the 28 TP hits
+// average +34.16 and carry the whole account against 143 losers). TP sits at
+// 1.8 x 1.5*ATR = 2.7*ATR, so locking breakeven at 1*ATR gets tagged by ordinary
+// retracement and converts would-be big winners into scratches. A profit lock
+// suits EA #3's 67%-win mean-reversion profile, not this one. Do not enable
+// without re-testing - "best practice from the better EA" did not transfer.
+input bool     InpUseBreakeven     = false;      // Move SL to entry+buffer once far enough in profit
+input double   InpBETriggerAtrMult = 1.0;        // Profit (in ATR) required before locking breakeven
+input int      InpBELockPoints     = 20;         // Profit locked at breakeven (points, covers spread/commission)
+
+input group "=== Loss Streak Protection - TESTED AND REJECTED, default OFF ==="
+// Same story: EA #3 caps losses per day and cools off after a loss, and holds
+// drawdown near 11% while this EA ran a 10-loss streak. Enabling it here made
+// drawdown WORSE, not better:
+//   baseline    $223.07  DD 15.18%
+//   guards on   $187.39  DD 19.63%
+// Reason: the per-trade diagnostic showed trades this EA opens while already 3+
+// losses deep are net POSITIVE (+152.98). Its losing streaks are followed by the
+// recovery trades, so sitting them out skips the drawdown repair. The same
+// measurement for EA #2 was -64.52, and the guards do help there.
+input bool     InpUseDailyLossGuard = false;     // Stop opening new trades after N losses in one day
+input int      InpMaxDailyLosses    = 3;         // Maximum losing trades per day
+input bool     InpUseLossCooldown   = false;     // Pause new entries for a while after a losing trade
+input int      InpLossCooldownMins  = 75;        // Cooldown length after a loss (minutes)
+
 input group "=== Session Filter (Broker/Server Time) ==="
-input int      InpSessionStartHour = 8;          // Session Start Hour (London open through NY close)
+input int      InpSessionStartHour = 6;          // Session Start Hour (London open through NY close)
 input int      InpSessionEndHour   = 23;         // Session End Hour
 input bool     InpAvoidFriday      = true;       // Cut off trading late on Friday
 input int      InpFridayCutoffHour = 20;         // Friday Cutoff Hour
@@ -99,16 +131,34 @@ int OnInit()
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(symbolName);
 
+   EventSetTimer(InpIngestHeartbeatSec);
+   IngestSetEaStatus("active");
+
    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
+   IngestSetEaStatus("standby");
+
    IndicatorRelease(handleEmaFast);
    IndicatorRelease(handleEmaSlow);
    IndicatorRelease(handleAdx);
    IndicatorRelease(handleAtrEntry);
+}
+
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   IngestSendHeartbeat(symbolName);
+}
+
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+{
+   IngestHandleTradeTransaction(trans, InpMagicNumber, symbolName);
 }
 
 //+------------------------------------------------------------------+
@@ -230,12 +280,73 @@ double GetAtr()
 }
 
 //+------------------------------------------------------------------+
+// Count this EA's losing closes for the current broker day and find the most
+// recent one. Read from trade history rather than tracked in a counter so the
+// guards keep working after a terminal restart or a mid-day reattach, and so a
+// manual close is counted the same as an EA close.
+//+------------------------------------------------------------------+
+void GetTodayLossStats(int &lossesToday, datetime &lastLossTime)
+{
+   lossesToday  = 0;
+   lastLossTime = 0;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime dayStart = StructToTime(dt);
+
+   if(!HistorySelect(dayStart, TimeCurrent() + 1)) return;
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbolName) continue;
+      if((ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
+
+      // Net result, not gross: a trade closed a hair above the stop still counts
+      // as a loss once commission and swap are paid.
+      double net = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                 + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                 + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      if(net >= 0) continue;
+
+      lossesToday++;
+      datetime closeTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(closeTime > lastLossTime) lastLossTime = closeTime;
+   }
+}
+
+//+------------------------------------------------------------------+
+bool IsLossGuardBlocking()
+{
+   if(!InpUseDailyLossGuard && !InpUseLossCooldown) return false;
+
+   int lossesToday; datetime lastLossTime;
+   GetTodayLossStats(lossesToday, lastLossTime);
+
+   if(InpUseDailyLossGuard && lossesToday >= InpMaxDailyLosses)
+      return true;
+
+   if(InpUseLossCooldown && lastLossTime > 0 &&
+      (TimeCurrent() - lastLossTime) < (long)InpLossCooldownMins * 60)
+      return true;
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
 void CheckForEntry()
 {
    if(CountOpenPositions() >= InpMaxOpenPositions) return;
    if(tradesToday >= InpMaxTradesPerDay) return;
    if(!IsWithinSession()) return;
    if(!IsSpreadOk()) return;
+   if(IsLossGuardBlocking()) return;
 
    int trend = GetTrendBias();
    if(trend == 0) return;
@@ -289,23 +400,55 @@ void OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp)
    {
       tradesToday++;
       Print("Trade opened: ", EnumToString(type), " Lots=", InpLotSize, " SL=", sl, " TP=", tp);
+
+      ulong dealTicket = trade.ResultDeal();
+      if(HistoryDealSelect(dealTicket))
+      {
+         ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+         double openPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+         datetime openTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+         double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+         double commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+         string side = (type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+
+         double slAmount = 0, tpAmount = 0;
+         bool slCalcOk = OrderCalcProfit(type, symbolName, InpLotSize, openPrice, sl, slAmount);
+         bool tpCalcOk = OrderCalcProfit(type, symbolName, InpLotSize, openPrice, tp, tpAmount);
+
+         IngestTrackOpen(positionId, side, InpLotSize, openPrice, sl, tp, slAmount, tpAmount, openTime);
+         IngestTradeOpened(positionId, symbolName, side, InpLotSize, openPrice, sl, tp,
+                            slAmount, tpAmount, openTime, swap, commission);
+      }
    }
    else
    {
       Print("OrderSend failed. Error: ", GetLastError(),
             " Retcode: ", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+      IngestLog(InpIngestEaId, "error", StringFormat("OrderSend failed: retcode=%d %s",
+                trade.ResultRetcode(), trade.ResultRetcodeDescription()));
    }
 }
 
 //+------------------------------------------------------------------+
-void ManageTrailingStop()
+// Two-stage stop management, applied in this order per position:
+//   1) Breakeven - once the trade is InpBETriggerAtrMult ATR in profit, pull the
+//      stop to entry plus InpBELockPoints so the trade can no longer close red.
+//   2) ATR trail - keep the stop InpTrailAtrMult ATR behind price.
+// The stop only ever moves in the favourable direction (max/min against the
+// current stop), so the trail can never undo the breakeven lock - which was the
+// flaw in the trail-only version: it could drag the stop back to roughly
+// -0.3*ATR after a trade had already been more than 1*ATR in profit.
+//+------------------------------------------------------------------+
+void ManagePositionStops()
 {
-   if(!InpUseTrailing) return;
+   if(!InpUseTrailing && !InpUseBreakeven) return;
 
    double atr = GetAtr();
    if(atr <= 0) return;
 
-   int digits = (int)SymbolInfoInteger(symbolName, SYMBOL_DIGITS);
+   int    digits = (int)SymbolInfoInteger(symbolName, SYMBOL_DIGITS);
+   double point  = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   double lock   = InpBELockPoints * point;
 
    for(int i=0; i<PositionsTotal(); i++)
    {
@@ -314,23 +457,53 @@ void ManageTrailingStop()
       if(PositionGetString(POSITION_SYMBOL) != symbolName) continue;
       if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber) continue;
 
-      long   type  = PositionGetInteger(POSITION_TYPE);
-      double posSl = PositionGetDouble(POSITION_SL);
-      double posTp = PositionGetDouble(POSITION_TP);
+      long   type      = PositionGetInteger(POSITION_TYPE);
+      double posSl     = PositionGetDouble(POSITION_SL);
+      double posTp     = PositionGetDouble(POSITION_TP);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
 
       if(type == POSITION_TYPE_BUY)
       {
-         double bid   = SymbolInfoDouble(symbolName, SYMBOL_BID);
-         double newSl = NormalizeDouble(bid - atr * InpTrailAtrMult, digits);
-         if(newSl > posSl && newSl < bid)
-            trade.PositionModify(ticket, newSl, posTp);
+         double bid       = SymbolInfoDouble(symbolName, SYMBOL_BID);
+         double desiredSl = posSl;
+
+         if(InpUseBreakeven && (bid - openPrice) >= atr * InpBETriggerAtrMult)
+         {
+            double beSl = openPrice + lock;
+            if(beSl > desiredSl) desiredSl = beSl;
+         }
+         if(InpUseTrailing)
+         {
+            double trailSl = bid - atr * InpTrailAtrMult;
+            if(trailSl > desiredSl) desiredSl = trailSl;
+         }
+
+         desiredSl = NormalizeDouble(desiredSl, digits);
+         if(desiredSl > posSl && desiredSl < bid)
+            trade.PositionModify(ticket, desiredSl, posTp);
       }
       else if(type == POSITION_TYPE_SELL)
       {
-         double ask   = SymbolInfoDouble(symbolName, SYMBOL_ASK);
-         double newSl = NormalizeDouble(ask + atr * InpTrailAtrMult, digits);
-         if((posSl == 0 || newSl < posSl) && newSl > ask)
-            trade.PositionModify(ticket, newSl, posTp);
+         double ask       = SymbolInfoDouble(symbolName, SYMBOL_ASK);
+         // A fresh sell can legitimately carry SL==0 only if stops were rejected;
+         // treat that as "no protection yet" so any candidate stop is an upgrade.
+         double desiredSl = (posSl == 0) ? DBL_MAX : posSl;
+
+         if(InpUseBreakeven && (openPrice - ask) >= atr * InpBETriggerAtrMult)
+         {
+            double beSl = openPrice - lock;
+            if(beSl < desiredSl) desiredSl = beSl;
+         }
+         if(InpUseTrailing)
+         {
+            double trailSl = ask + atr * InpTrailAtrMult;
+            if(trailSl < desiredSl) desiredSl = trailSl;
+         }
+
+         if(desiredSl == DBL_MAX) continue;
+         desiredSl = NormalizeDouble(desiredSl, digits);
+         if((posSl == 0 || desiredSl < posSl) && desiredSl > ask)
+            trade.PositionModify(ticket, desiredSl, posTp);
       }
    }
 }
@@ -339,7 +512,7 @@ void ManageTrailingStop()
 void OnTick()
 {
    ResetDailyCounterIfNeeded();
-   ManageTrailingStop();
+   ManagePositionStops();
 
    if(!IsNewBar()) return;
 
