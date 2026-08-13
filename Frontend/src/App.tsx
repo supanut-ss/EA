@@ -130,7 +130,7 @@ export default function App() {
             </Box>
 
             <Typography variant="caption" color="text.disabled" textAlign="center">
-              EA Console · ข้อมูลตัวอย่างสำหรับ dev (mock data) — ยังไม่เชื่อมต่อ backend จริง
+              EA Console · เชื่อมต่อ backend จริงแล้ว
             </Typography>
           </Stack>
         ) : null}

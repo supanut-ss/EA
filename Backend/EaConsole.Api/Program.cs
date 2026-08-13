@@ -66,16 +66,18 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 // reverse proxy (nginx/IIS) หรือ PaaS เป็นคน terminate TLS แทน
 app.UseCors("Frontend");
 
-// Gate เฉพาะ /api/ingest (ฝั่ง EA ยิงเข้ามา) ด้วย shared API key ก่อน
-// deploy จริง — ตอนนี้ปิดอยู่โดย default (Ingest:ApiKey ว่าง = ไม่เช็ค,
-// พฤติกรรมเดิมเป๊ะสำหรับ dev บน localhost) ตั้งค่า Ingest:ApiKey (หรือ env
-// var Ingest__ApiKey) แล้ว EA ต้องส่ง header X-Api-Key มาให้ตรงกันถึงจะผ่าน
-// — endpoint ฝั่งอ่าน (Dashboard) ไม่โดน gate นี้ เพราะ frontend เรียกจาก
-// browser ผ่าน CORS ไม่มีที่เก็บ secret ให้ปลอดภัย
+// Gate เฉพาะ endpoint ที่ EA ยิงเข้ามา (/api/ingest ของ EA1/EA2, /api/signals
+// ของ EA3) ด้วย shared API key ก่อน deploy จริง — ตอนนี้ปิดอยู่โดย default
+// (Ingest:ApiKey ว่าง = ไม่เช็ค, พฤติกรรมเดิมเป๊ะสำหรับ dev บน localhost)
+// ตั้งค่า Ingest:ApiKey (หรือ env var Ingest__ApiKey) แล้ว EA ต้องส่ง header
+// X-Api-Key มาให้ตรงกันถึงจะผ่าน — endpoint ฝั่งอ่าน (Dashboard) ไม่โดน gate
+// นี้ เพราะ frontend เรียกจาก browser ผ่าน CORS ไม่มีที่เก็บ secret ให้ปลอดภัย
 var ingestApiKey = app.Configuration["Ingest:ApiKey"];
 app.Use(async (context, next) =>
 {
-    if (!string.IsNullOrEmpty(ingestApiKey) && context.Request.Path.StartsWithSegments("/api/ingest"))
+    var path = context.Request.Path;
+    bool isGatedPath = path.StartsWithSegments("/api/ingest") || path.StartsWithSegments("/api/signals");
+    if (!string.IsNullOrEmpty(ingestApiKey) && isGatedPath)
     {
         if (!context.Request.Headers.TryGetValue("X-Api-Key", out var provided) || provided != ingestApiKey)
         {

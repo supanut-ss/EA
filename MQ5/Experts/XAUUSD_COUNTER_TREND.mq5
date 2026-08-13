@@ -14,8 +14,8 @@
 //--- Input Parameters
 input group "== Webhook Connection Settings =="
 input bool     InpEnableWebhookPolling = true;                 // เปิดใช้งานการดึงสัญญาณการเทรดผ่าน Webhook
-input string   InpBackendURL           = "https://ats.thaipesleague.com"; // ลิงก์ API หลังบ้าน C# (ตัวจริง)
-input string   InpAuthToken            = "ats_sec_9f5c4b8e2a1d7f0e3c6b8a9f"; // โทเค็นยืนยันตัวตนสำหรับดึงสัญญาณ
+input string   InpBackendURL           = "https://ea.thaipesleague.com"; // ลิงก์ API หลังบ้าน C# (EA Console dashboard - เดิมชี้ ats.thaipesleague.com)
+input string   InpAuthToken            = "33be34ac24f13a1131f00b8451c9be4a1e3dbc1a5bfee721fd45f2f8142ede86"; // ต้องตรงกับ Ingest:ApiKey ของ backend (ส่งเป็น header X-Api-Key ด้วย ดู WebRequest calls ด้านล่าง)
 input int      InpPollInterval         = 10000;                 // รอบเวลาการดึงข้อมูลจากหลังบ้าน (มิลลิวินาที)
 input int      InpSignalDedupDays      = 30;                    // เก็บผล signal ID เพื่อป้องกันเปิดซ้ำข้าม restart
 input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Tester server offset from UTC (for example 2 or 3)
@@ -725,7 +725,7 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
 {
    if(!IsExternalIntegrationAllowed()) return;
    string url  = backend_url + "/api/signals/local";
-   string hdr  = "Content-Type: application/json\r\n";
+   string hdr  = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
    string pay  = StringFormat("{\"token\":\"%s\",\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
                               "\"volume\":%s,\"entry_price\":%s,\"sl\":%s,\"tp\":%s,"
                               "\"status\":\"%s\",\"ticket\":\"%s\",\"exit_price\":%s,\"profit\":%s,"
@@ -2490,7 +2490,7 @@ string GetMT5StateJson()
 void OnTimer()
 {
    if(!InpEnableWebhookPolling || !IsExternalIntegrationAllowed()) return;
-   string url=backend_url+"/api/signals/pending", hdr="Content-Type: application/json\r\n";
+   string url=backend_url+"/api/signals/pending", hdr="Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
    string pay=GetMT5StateJson();
    char pd[],rd[]; string rh;
    StringToCharArray(pay,pd,0,StringLen(pay),CP_UTF8);
@@ -3011,7 +3011,7 @@ void ExecuteClose(string id,string sym,ulong ticket)
 
 void UpdateSignalStatus(string id,string status,ulong ticket,double ep,double xp,double pf)
 {
-   string url=backend_url+"/api/signals/update", hdr="Content-Type: application/json\r\n";
+   string url=backend_url+"/api/signals/update", hdr="Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
    string pay=StringFormat("{\"token\":\"%s\",\"id\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\","
                            "\"entry_price\":%s,\"exit_price\":%s,\"profit\":%s}",
       auth_token,id,status,IntegerToString(ticket),

@@ -31,6 +31,10 @@ Backend/EaConsole.Api/wwwroot/
 # publish + a web.config patched with real runtime secrets, never commit) ----------
 /deploy/
 
+# ---------- Deploy manifest cache (local file hashes from prior verified
+# uploads - machine-specific optimization state, not meaningful to share) ----------
+/.deploy-cache/
+
 # ---------- SQL local data / dumps ----------
 *.mdf
 *.ldf
