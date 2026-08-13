@@ -57,6 +57,13 @@ struct IngestOpenTradeInfo
 };
 IngestOpenTradeInfo g_ingestOpenTrades[];
 
+//--- IngestSend() only ever Print()s on FAILURE - a fully-working EA and a
+//    silently-misconfigured one (wrong AccountId/EaId, backend down, etc.)
+//    look IDENTICAL in the Experts tab: total silence. This counter drives
+//    a periodic "still alive" confirmation so success is visible too,
+//    without spamming a line every single heartbeat (default 10s).
+int g_ingestHeartbeatCount = 0;
+
 //+------------------------------------------------------------------+
 string IngestIsoTime(datetime t)
 {
@@ -104,6 +111,25 @@ bool IngestSend(string method, string path, string jsonBody)
 }
 
 //+------------------------------------------------------------------+
+// Call once from the including EA's OnInit(), after InpIngestEnabled is
+// known - this ONE line at startup would have caught the exact bug found
+// in production (InpIngestAccountId pointing at a nonexistent account):
+// the value actually being used is right there in the log immediately,
+// instead of inferring it from silence.
+//+------------------------------------------------------------------+
+void IngestPrintStartupInfo()
+{
+   if(!InpIngestEnabled)
+   {
+      Print("Ingest: disabled (InpIngestEnabled=false) - nothing will be sent to backend");
+      return;
+   }
+   Print("Ingest: enabled -> ", InpIngestBaseUrl,
+         " (AccountId=", InpIngestAccountId, ", EaId=", InpIngestEaId,
+         ", heartbeat every ", InpIngestHeartbeatSec, "s)");
+}
+
+//+------------------------------------------------------------------+
 void IngestSendHeartbeat(string symbol)
 {
    if(!InpIngestEnabled) return;
@@ -122,7 +148,18 @@ void IngestSendHeartbeat(string symbol)
       InpIngestAccountId, IngestIsoTime(TimeCurrent()), balance, equity,
       margin, freeMargin, marginLevel, spread);
 
-   IngestSend("POST", "/api/ingest/snapshot", json);
+   bool ok = IngestSend("POST", "/api/ingest/snapshot", json);
+   if(ok)
+   {
+      g_ingestHeartbeatCount++;
+      // First success right away, then roughly once every 10 minutes -
+      // frequent enough to notice quickly if it silently stops, not so
+      // frequent it buries real trade activity in the log.
+      int printEvery = (InpIngestHeartbeatSec > 0) ? MathMax(1, 600 / InpIngestHeartbeatSec) : 60;
+      if(g_ingestHeartbeatCount == 1 || g_ingestHeartbeatCount % printEvery == 0)
+         Print("Ingest: heartbeat OK #", g_ingestHeartbeatCount,
+               " (Balance=", DoubleToString(balance,2), " Equity=", DoubleToString(equity,2), ")");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -174,7 +211,8 @@ void IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
       InpIngestAccountId, InpIngestEaId, ticket, symbol, side, lot,
       openPrice, sl, tp, openPrice, slAmount, tpAmount, IngestIsoTime(openTime), swap, commission);
 
-   IngestSend("POST", "/api/ingest/trade", json);
+   if(IngestSend("POST", "/api/ingest/trade", json))
+      Print("Ingest: trade #", ticket, " reported as OPEN");
 }
 
 //+------------------------------------------------------------------+
@@ -197,7 +235,8 @@ void IngestTradeClosed(ulong ticket, string symbol, string side, double lot,
       IngestIsoTime(openTime), IngestIsoTime(closeTime),
       pnl, swap, commission, closeReason);
 
-   IngestSend("POST", "/api/ingest/trade", json);
+   if(IngestSend("POST", "/api/ingest/trade", json))
+      Print("Ingest: trade #", ticket, " reported as CLOSED (pnl=", DoubleToString(pnl,2), ")");
 }
 
 //+------------------------------------------------------------------+

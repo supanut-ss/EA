@@ -132,6 +132,7 @@ int OnInit()
    trade.SetTypeFillingBySymbol(symbolName);
 
    EventSetTimer(InpIngestHeartbeatSec);
+   IngestPrintStartupInfo();
    IngestSetEaStatus("active");
 
    return(INIT_SUCCEEDED);

@@ -21,6 +21,7 @@ builder.Services.AddDbContext<EaConsoleDbContext>(options =>
 
 builder.Services.AddScoped<IDashboardQueryService, DashboardQueryService>();
 builder.Services.AddScoped<IIngestService, IngestService>();
+builder.Services.AddHostedService<SnapshotRetentionService>();
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options =>

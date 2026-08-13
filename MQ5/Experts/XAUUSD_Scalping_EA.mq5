@@ -61,10 +61,17 @@ input int      InpMaxOpenPositions     = 2;          // Max Open Positions (this
 input int      InpMaxTradesPerDayTrend = 15;         // Max Trades/Day - Trend Mode
 input int      InpMaxTradesPerDayChoppy = 8;         // Max Trades/Day - Range/Choppy Mode (extra caution)
 
+// Defaults below (InpAdxThreshold, InpRsiPullbackDeepLow/High, InpRsiOversold,
+// InpAtrSlMultRange, InpRiskReward, InpMaxBarsInTrade) come from genetic
+// optimization round 3 (Pass 2180, filtered to Trades>=200 to avoid the
+// overfit top-ranked pass that traded only 39 times) + round 4 (confirmed
+// InpAtrSlMultRange=0.4 is a real local optimum, not a search-range edge
+// artifact). XAUUSD M5, 2026.02.11-2026.08.11: 218 trades, PF 1.62, Max DD
+// 3.30%, Net Profit $148.68 on $1000/0.01 lot.
 input group "=== Regime Filter (Higher Timeframe H1) ==="
 input ENUM_TIMEFRAMES InpRegimeTF  = PERIOD_H1; // Regime Timeframe
 input int      InpAdxPeriod        = 14;        // ADX Period
-input double   InpAdxThreshold     = 30.0;      // ADX Threshold: >=Trend, <Range/Choppy
+input double   InpAdxThreshold     = 25.0;      // ADX Threshold: >=Trend, <Range/Choppy
 input int      InpEmaFastH1        = 50;        // EMA Fast Period (trend direction)
 input int      InpEmaSlowH1        = 200;       // EMA Slow Period (trend direction)
 
@@ -74,22 +81,22 @@ input int      InpEmaFastM5        = 20;        // M5 Fast EMA (pullback confirm
 input int      InpRsiPeriod        = 14;        // RSI Period (shared by both modes)
 input double   InpRsiPullbackLow   = 45.0;      // RSI level: uptrend recovery trigger
 input double   InpRsiPullbackHigh  = 55.0;      // RSI level: downtrend recovery trigger
-input double   InpRsiPullbackDeepLow  = 20.0;   // RSI must have dipped below this (uptrend) to count as a real pullback
-input double   InpRsiPullbackDeepHigh = 55.0;   // RSI must have risen above this (downtrend) to count as a real pullback
+input double   InpRsiPullbackDeepLow  = 25.0;   // RSI must have dipped below this (uptrend) to count as a real pullback
+input double   InpRsiPullbackDeepHigh = 65.0;   // RSI must have risen above this (downtrend) to count as a real pullback
 input int      InpPullbackLookbackBars = 6;      // Bars to scan for the RSI dip/rise before the recovery bar
 
 input group "=== Entry - Range/Choppy Mode (M5, mean-reversion, 2-bar confirm) ==="
 input int      InpBbPeriod         = 20;        // Bollinger Bands Period
 input double   InpBbDeviation      = 2.5;       // Bollinger Bands Deviation
-input double   InpRsiOversold      = 40.0;      // RSI Oversold Level (setup bar)
+input double   InpRsiOversold      = 45.0;      // RSI Oversold Level (setup bar)
 input double   InpRsiOverbought    = 80.0;      // RSI Overbought Level (setup bar)
 
 input group "=== Risk Management ==="
 input int      InpAtrPeriod        = 14;        // ATR Period (M5)
 input double   InpAtrSlMultTrend   = 1.0;        // ATR Multiplier for SL - Trend Mode
-input double   InpAtrSlMultRange   = 0.6;        // ATR Multiplier for SL - Range Mode (wider, wick noise)
-input double   InpRiskReward       = 1.6;        // Risk:Reward Ratio (TP distance)
-input int      InpMaxBarsInTrade   = 24;         // Time-based exit: close after N entry-TF bars
+input double   InpAtrSlMultRange   = 0.4;        // ATR Multiplier for SL - Range Mode (wider, wick noise)
+input double   InpRiskReward       = 1.0;        // Risk:Reward Ratio (TP distance)
+input int      InpMaxBarsInTrade   = 36;         // Time-based exit: close after N entry-TF bars
 
 input group "=== Breakeven & Trailing (profit lock) - TESTED, KEEP ON ==="
 // This EA had NO stop management at all: every trade sat on its original fixed SL
@@ -171,6 +178,7 @@ int OnInit()
    trade.SetTypeFillingBySymbol(symbolName);
 
    EventSetTimer(InpIngestHeartbeatSec);
+   IngestPrintStartupInfo();
    IngestSetEaStatus("active");
 
    return(INIT_SUCCEEDED);

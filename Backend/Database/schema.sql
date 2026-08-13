@@ -121,6 +121,15 @@ CREATE INDEX idx_trades_close_time   ON trades (close_time_broker);
 --    สำหรับ equity curve และคำนวณ drawdown — EA/backend ยิงเข้ามาเป็น
 --    ระยะ (แนะนำทุก 1-5 นาที ระหว่าง session, หรือทุกครั้งที่มี tick
 --    สำคัญ) ยิ่งถี่ยิ่งคำนวณ intraday drawdown ได้แม่นขึ้นแต่ตารางโตเร็วขึ้น
+--
+--    Retention: ไม่ได้ prune ผ่าน MySQL EVENT (event_scheduler ปิดอยู่บน
+--    shared host นี้ และ persist ข้าม MySQL restart ไม่ได้แน่นอน) - ตาราง
+--    นี้ถูก thin ให้เหลือวันละ 1 แถวสำหรับข้อมูลเก่ากว่า 3 วัน โดย
+--    SnapshotRetentionService (BackgroundService ในตัวแอป, ดู
+--    Backend/EaConsole.Api/Services/SnapshotRetentionService.cs) รันทุก
+--    6 ชั่วโมง ข้อมูลละเอียดระดับวินาทีของ 3 วันล่าสุดยังอยู่ครบสำหรับ
+--    debug ส่วนกราฟ Equity Curve (v_equity_curve_daily ด้านล่าง) ใช้แค่
+--    แถวล่าสุดของแต่ละวันอยู่แล้วจึงไม่ได้รับผลกระทบ
 -- ---------------------------------------------------------------------
 CREATE TABLE account_snapshots (
   snapshot_id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
