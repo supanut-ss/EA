@@ -99,7 +99,6 @@ export interface DashboardSnapshot {
   connection: ConnectionState;
   lastSyncedAt: string;
   brokerTime: string;
-  localTime: string;
   accountInfo: AccountInfo;
   account: AccountSummary;
   equityCurve: EquityPoint[];
