@@ -25,6 +25,15 @@ obj/
 *.pubxml
 *.pubxml.user
 publish/
+Backend/EaConsole.Api/wwwroot/
+
+# ---------- Deploy staging (deploy.ps1 output - contains a self-contained
+# publish + a web.config patched with real runtime secrets, never commit) ----------
+/deploy/
+
+# ---------- Deploy manifest cache (local file hashes from prior verified
+# uploads - machine-specific optimization state, not meaningful to share) ----------
+/.deploy-cache/
 
 # ---------- SQL local data / dumps ----------
 *.mdf
@@ -35,7 +44,7 @@ publish/
 # ---------- MQL5 / MT5 (MQ5) ----------
 **/*.ex5
 **/*.ex4
-MQ5/Backtest/compile_log.txt
+MQ5/Backtest/compile_log*.txt
 MQ5/Backtest/*Report*.htm
 MQ5/Backtest/*.pass
 

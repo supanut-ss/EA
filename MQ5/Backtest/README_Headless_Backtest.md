@@ -21,3 +21,16 @@ Bash ของผมอยู่ใน sandbox Linux แยกจากเคร
 ## ถ้ารันแล้วไม่มี report ออกมา
 
 สาเหตุที่พบบ่อยที่สุด: MT5 ยังไม่มีข้อมูลราคาย้อนหลังของ XAUUSD M15/H1 ช่วงที่ระบุใน `FromDate`/`ToDate` แคชอยู่ในเครื่อง แก้โดยเปิด MT5 ตามปกติ เปิดกราฟ XAUUSD ทั้ง M15 และ H1 แล้วกด Home ค้าง/scroll ย้อนหลังให้โหลดข้อมูลเก่าเข้ามาก่อนสักครั้ง จากนั้นค่อยรัน `run_backtest.bat` ใหม่
+
+## รัน Genetic Optimization แบบ Headless (`run_optimize.bat`)
+
+ใช้ `tester_config_optimize.ini` แทน `tester_config.ini` — ค้นหาค่า parameter ที่ดีที่สุดโดยอิงคะแนนจาก `OnTester()` ในโค้ด EA (กำไร × ปรับตามความถี่ไม้/วัน × ปรับตาม drawdown) แทนการดู balance อย่างเดียว
+
+ขั้นตอนเหมือน `run_backtest.bat`:
+
+1. เปิดไฟล์ `run_optimize.bat` ด้วย Notepad แก้ `DATAFOLDER=` ให้เป็น path เดียวกับที่ใช้ใน `run_backtest.bat`
+2. เช็คช่วงพารามิเตอร์ที่จะ optimize ใน `tester_config_optimize.ini` (คอลัมน์ `Y` ใน `[TesterInputs]` คือตัวที่ค้นหา) ว่าตรงกับที่ต้องการไหม
+3. ดับเบิลคลิก `run_optimize.bat` — มันจะ copy EA, compile, แล้วรัน genetic optimization ให้เองทั้งหมด
+4. ผลลัพธ์เซฟเป็นไฟล์ในโฟลเดอร์ `Tester` ใต้ Data Folder ชื่อขึ้นต้นด้วย `XAUUSD_TrendBreakout_Optimize` — copy กลับมาให้ผมดู
+
+**ข้อควรระวังเรื่อง RAM:** จากการทดลองรันจริงบนเครื่องนี้ (ดู `tester_config_optimize.ini` และ `XAUUSD_TrendBreakout_Spec.md`) progress เคยค้างที่ ~2% เพราะ RAM ว่างไม่พอ (agent แต่ละตัวกิน ~900MB+ สำหรับ tick data) ก่อนรันควรปิดโปรแกรมอื่นที่กิน RAM มาก หรือลดจำนวน local agent ใน MT5 (Tools > Options > Strategy Tester Agents) ถ้ายังค้าง

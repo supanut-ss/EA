@@ -13,6 +13,14 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 {
     private static readonly TimeSpan HistoryWindow = TimeSpan.FromDays(30);
 
+    public async Task<List<AccountListItemDto>> GetAccountsAsync(CancellationToken ct = default)
+    {
+        return await db.Accounts
+            .OrderBy(a => a.AccountId)
+            .Select(a => new AccountListItemDto(a.AccountId, a.Mt5Login, a.BrokerName, a.ServerName, a.IsDemo))
+            .ToListAsync(ct);
+    }
+
     public async Task<DashboardSnapshotDto?> GetSnapshotAsync(int accountId, CancellationToken ct = default)
     {
         var account = await db.Accounts.AsNoTracking().FirstOrDefaultAsync(a => a.AccountId == accountId, ct);
@@ -41,10 +49,18 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 
         var offsetLabel = FormatGmtOffset(account.BrokerGmtOffsetMinutes);
 
+        var accountInfo = new AccountInfoDto(
+            AccountId: account.AccountId,
+            Mt5Login: account.Mt5Login,
+            BrokerName: account.BrokerName,
+            IsDemo: account.IsDemo
+        );
+
         return new DashboardSnapshotDto(
             Connection: latestSnapshot.ConnectionState.ToDb(),
             LastSyncedAt: latestSnapshot.CreatedAt,
             BrokerTime: $"{brokerNow:HH:mm:ss} {offsetLabel}",
+            AccountInfo: accountInfo,
             Account: accountSummary,
             EquityCurve: equityCurve,
             OpenPositions: openPositions,
@@ -153,7 +169,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             ClosePrice: t.ClosePrice,
             Pnl: t.Pnl,
             ClosedAtBroker: t.CloseTimeBroker!.Value.ToString("HH:mm"),
-            CloseReason: t.CloseReason?.ToDisplayText()
+            CloseReason: EnumDbMaps.PrettifyCloseReason(t.CloseReason)
         )).ToList();
     }
 

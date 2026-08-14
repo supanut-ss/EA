@@ -11,18 +11,18 @@ EA ตัวที่ 1 จาก 2 ตัว (Trend Following & Breakout) ไ�
 - **Risk:** Fixed lot size ตาม input, SL = 1.5×ATR, TP = SL×1.8 (R:R), Trailing stop แบบ ATR ให้ไหลตามเทรนด์
 - **ความถี่ไม้:** M15 breakout + max 4 ไม้/วัน ควรให้ 2-3 ไม้/วันได้ตามเป้า แต่ขึ้นกับความผันผวนจริง — ถ้า backtest ได้น้อยกว่าที่ต้องการ ให้ปรับ `InpDonchianPeriod` ให้สั้นลง หรือขยาย session window
 
-## Input parameters สำคัญ (อัปเดตหลัง backtest จริง 6 รอบ 11 ส.ค. 2026)
+## Input parameters สำคัญ (อัปเดตหลัง genetic optimization 12 ส.ค. 2026)
 
-| Input | ค่า default (v1) | ค่าที่ปรับแล้ว (v2 — ใช้อยู่ตอนนี้) | ปรับเพื่อ |
+| Input | ค่า default (v1) | ค่าที่ใช้อยู่ตอนนี้ (v3 — จาก optimization) | ปรับเพื่อ |
 |---|---|---|---|
 | `InpLotSize` | 0.01 | 0.01 | ขนาดไม้คงที่ (fixed lot ตามที่เลือกไว้) |
 | `InpMaxTradesPerDay` | 4 | 6 | จำกัดไม้/วัน |
-| `InpMaxOpenPositions` | 1 | **3** | อนุญาตไม้ซ้อนตามเทรนด์เดียวกัน — ผลกระทบใหญ่สุดต่อทั้งกำไรและจำนวนไม้ |
-| `InpAdxThreshold` | 20 | 20 (คงเดิม — ลดแล้วผลแย่ลง) | ยิ่งสูง = กรองเทรนด์เข้มขึ้น ไม้น้อยลงแต่แม่นขึ้น |
-| `InpDonchianPeriod` | 20 | **10** | ยิ่งสั้น = breakout ไวขึ้น ไม้มากขึ้นแต่หลอกง่ายขึ้น |
-| `InpAtrBufferMult` | 0.30 | 0.30 (คงเดิม — ลดแล้วผลแย่ลง) | ยิ่งสูง = กรอง fakeout เข้มขึ้น ไม้น้อยลง |
-| `InpAtrSlMult` / `InpRiskReward` | 1.5 / 1.8 | 1.5 / 1.8 | ระยะ SL/TP |
-| `InpSessionStartHour/EndHour` | 13/21 | **8/23** | ช่วงเวลาเทรด (broker server time, GMT+7 บน Exness-MT5Trial8) — ขยายจาก London/NY overlap อย่างเดียวเป็น London open ถึง NY close ทั้งช่วง |
+| `InpMaxOpenPositions` | 1 | **4** | อนุญาตไม้ซ้อนตามเทรนด์เดียวกัน — ผลกระทบใหญ่สุดต่อทั้งกำไรและจำนวนไม้ (4 กับ 5 ให้ผลเหมือนกันเป๊ะในผล optimize — ไม่มีไม้ซ้อนเกิน 4 จริงที่ความถี่นี้ จึงเลือก 4) |
+| `InpAdxThreshold` | 20 | 20 (คงเดิม — ลดแล้วผลแย่ลง, ไม่ได้รวมใน optimize รอบนี้) | ยิ่งสูง = กรองเทรนด์เข้มขึ้น ไม้น้อยลงแต่แม่นขึ้น |
+| `InpDonchianPeriod` | 20 | **8** | ยิ่งสั้น = breakout ไวขึ้น ไม้มากขึ้นแต่หลอกง่ายขึ้น |
+| `InpAtrBufferMult` | 0.30 | 0.30 (คงเดิม — ลดแล้วผลแย่ลง, ไม่ได้รวมใน optimize รอบนี้) | ยิ่งสูง = กรอง fakeout เข้มขึ้น ไม้น้อยลง |
+| `InpAtrSlMult` / `InpRiskReward` | 1.5 / 1.8 | 1.5 / 1.8 (ไม่ได้รวมใน optimize รอบนี้) | ระยะ SL/TP |
+| `InpSessionStartHour/EndHour` | 13/21 | **6/23** | ช่วงเวลาเทรด (broker server time, GMT+7 บน Exness-MT5Trial8) — ขยายจาก London open ถึง NY close เป็นตั้งแต่ก่อน London open เล็กน้อยถึง NY close |
 
 ## ผล Backtest จริง (Exness-MT5Trial8, XAUUSD M15, 2026.02.11–2026.08.11, every-tick real ticks, deposit $1,000)
 
@@ -34,15 +34,27 @@ EA ตัวที่ 1 จาก 2 ตัว (Trend Following & Breakout) ไ�
 | 4 | Donchian 10 | 158 (~1.2) | 1.19 | $145.24 | 10.96% |
 | 5 | Buffer 0.20 | 165 (~1.3) | 1.16 | $124.95 | 14.06% |
 | 6 | MaxOpenPositions 2 | 197 (~1.5) | 1.18 | $168.68 | 13.29% |
-| **7 (ใช้อยู่)** | **MaxOpenPositions 3** | **201 (~1.55)** | **1.25** | **$234.38** | **12.79%** |
+| 7 | MaxOpenPositions 3 | 201 (~1.55) | 1.25 | $234.38 | 12.79% |
 
 **บทเรียนสำคัญ:** การลด ADX threshold หรือเพิ่ม fakeout buffer เพื่อเพิ่มไม้ (รอบ 2, 5) ทำให้คุณภาพสัญญาณแย่ลงจนกำไรติดลบ — ตัวแปรที่เพิ่มไม้ได้โดยไม่ทำลาย edge คือการขยาย session window และการอนุญาตไม้ซ้อนตามเทรนด์ (`InpMaxOpenPositions`) ไม่ใช่การลดความเข้มงวดของ filter
 
-**ช่องว่างที่เหลือ:** เป้าหมาย 2-3 ไม้/วันยังไปไม่ถึง (ได้จริง ~1.5 ไม้/วันที่คุณภาพนี้) — Trend/Breakout เป็นสไตล์ที่ไม้น้อยกว่าโดยธรรมชาติ (เข้าเฉพาะจังหวะ breakout จริง) การเพิ่มไม้ให้ถึงเป้าในระดับพอร์ตรวมจะมาจาก EA ตัวที่ 2 (Scalping & Session-Based) ที่ความถี่สูงกว่าโดยดีไซน์
+**ยืนยันเพิ่มเติม (ก่อน optimize):** `InpMaxOpenPositions=4` ให้ผลเหมือน `=3` ทุกตัวเลข (201 ไม้, กำไร $234.38 เป๊ะ) ที่ Donchian=10 — แปลว่ากลยุทธ์แทบไม่เคยมีไม้ซ้อนกันเกิน 3 จริงๆ ที่ความถี่สัญญาณระดับนั้น
 
-**ยืนยันเพิ่มเติม:** `InpMaxOpenPositions=4` ให้ผลเหมือน `=3` ทุกตัวเลข (201 ไม้, กำไร $234.38 เป๊ะ) แปลว่ากลยุทธ์นี้แทบไม่เคยมีไม้ซ้อนกันเกิน 3 จริงๆ ที่ความถี่สัญญาณระดับนี้ — ไม่มีประโยชน์ที่จะเพิ่มค่านี้ต่อ
+## Genetic Optimization (12 ส.ค. 2026 — เครื่องใหม่, RAM 33GB/17.8GB ว่าง)
 
-**Custom optimization criterion:** เพิ่มฟังก์ชัน `OnTester()` ในโค้ดแล้ว (คำนวณคะแนน = กำไร × ปรับตามความถี่ไม้/วันให้เข้าใกล้ 2-3 × ปรับตาม drawdown) เพื่อให้ MT5 genetic optimizer ค้นหาโดยดูสมดุลเดียวกับที่เราต้องการ ไม่ใช่ balance อย่างเดียว — ทดลองรันบนเครื่องนี้แล้วพบว่า **RAM ว่างไม่พอ** (เหลือ ~2.8GB จาก 15.4GB) ทำให้ 8 local agent แย่งหน่วยความจำกันจนช้ามาก (ติดที่ ~2% นานหลายนาทีไม่ว่าจะลด search space แค่ไหน) จึงยังไม่ได้ผลจาก genetic optimization จริงในรอบนี้ ถ้าจะใช้ควรปิดโปรแกรมอื่นให้ RAM ว่างมากขึ้นก่อน หรือลดจำนวน local agent ใน MT5 (Tools > Options > Strategy Tester Agents)
+รันผ่าน `run_optimize.bat` + `tester_config_optimize.ini` (headless, Optimization=2 genetic, OptimizationCriterion=5 Custom = `OnTester()`) ค้นหา 4 ตัวแปร: `InpMaxOpenPositions` (1-5), `InpDonchianPeriod` (8-18 step 2), `InpSessionStartHour` (6/8/10), `InpSessionEndHour` (21/22/23) — ตัวแปรอื่น (ADX threshold, ATR buffer, SL/TP multiplier) fix ไว้ตามที่พิสูจน์แล้วว่าลดความเข้มงวดแล้วแย่ลง ได้ 119 passes จาก genetic algorithm (ไม่ใช่ full grid ~270 combos)
+
+| Pass | MaxOpen | Donchian | Session | ไม้ทั้งหมด (~ไม้/วัน) | Profit Factor | Net Profit | Max DD | Custom score |
+|---|---|---|---|---|---|---|---|---|
+| 60 (baseline รอบ 7 เดิม) | 3 | 10 | 8-23 | 201 (~1.55) | 1.25 | $234.38 | 12.79% | 89.0 |
+| **8 (ทางเลือก B: คุณภาพสูงสุด)** | 4 | 8 | 10-23 | 194 (~1.50) | **1.48** | $419.52 | **10.23%** | 186.0 |
+| **89 (เลือกใช้ — v3 ปัจจุบัน)** | **4** | **8** | **6-23** | **252 (~1.95)** | 1.37 | **$427.58** | 13.24% | **196.0** |
+
+**เลือกใช้ Pass 89** (`InpDonchianPeriod=8`, `InpSessionStartHour=6`, `InpSessionEndHour=23`, `InpMaxOpenPositions=4`) เป็นค่า default ใหม่ — คะแนน Custom สูงสุด, กำไรสูงสุด, และความถี่ไม้ใกล้เป้า 2-3 ไม้/วันมากที่สุดในผลทั้งหมด (~1.95/วัน) แม้ Profit Factor และ DD จะสู้ Pass 8 ไม่ได้ (Pass 8 เก็บไว้เป็นทางเลือกถ้าต้องการคุณภาพ/DD ต่ำกว่าความถี่)
+
+**อัปเดตไฟล์ที่แก้ตามผลนี้:** `XAUUSD_TrendBreakout_EA.mq5` (input defaults), `tester_config.ini`, `tester_config_optimize.ini` (baseline value ก่อน `||`) — compile แล้ว 0 errors, 0 warnings
+
+**ข้อควรระวัง:** ผลนี้ยัง**เป็น in-sample ช่วงเดียวกับที่ทดสอบมาตลอด** (2026.02.11–2026.08.11) — ยังไม่มี out-of-sample/walk-forward validation จริง ก่อนใช้เงินจริงควร forward-test บนเดโมด้วยค่าใหม่นี้อย่างน้อย 2-4 สัปดาห์เหมือนเดิม
 
 ## วิธี Backtest ใน MT5 (ทำตามลำดับ)
 

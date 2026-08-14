@@ -29,7 +29,13 @@ public class Trade
     public decimal? Pnl { get; set; }
     public decimal Swap { get; set; }
     public decimal Commission { get; set; }
-    public TradeCloseReason? CloseReason { get; set; }
+    // Free text, not an enum - EA1/EA2 send short codes (TP/SL/
+    // TRAILING_STOP/MANUAL/EA_LOGIC/OTHER, prettified for display in
+    // EnumDbMaps.PrettifyCloseReason), but EA3 sends its own descriptive
+    // reasons ("Structure Break", "Bearish CHoCH", "Time Stop", "Force
+    // Close (Session End)") that don't fit a small fixed set - shown
+    // verbatim since they're already human-readable.
+    public string? CloseReason { get; set; }
 
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

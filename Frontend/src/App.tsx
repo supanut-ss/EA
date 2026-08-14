@@ -18,10 +18,13 @@ import RiskSnapshotCard from "./components/RiskSnapshotCard";
 import ActivityLogCard from "./components/ActivityLogCard";
 
 import { useDashboardData } from "./hooks/useDashboardData";
+import { useAccounts } from "./hooks/useAccounts";
 import { getTheme } from "./theme";
 import { computeTradeStats } from "./utils/stats";
 
 const MODE_STORAGE_KEY = "ea-console-theme-mode";
+const ACCOUNT_STORAGE_KEY = "ea-console-account-id";
+const DEFAULT_ACCOUNT_ID = 1;
 
 function getInitialMode(): PaletteMode {
   const stored = localStorage.getItem(MODE_STORAGE_KEY);
@@ -29,11 +32,23 @@ function getInitialMode(): PaletteMode {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function getInitialAccountId(): number {
+  const stored = Number(localStorage.getItem(ACCOUNT_STORAGE_KEY));
+  return Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_ACCOUNT_ID;
+}
+
 export default function App() {
   const [mode, setMode] = useState<PaletteMode>(getInitialMode);
   const [eaFilter, setEaFilter] = useState("all");
+  const [accountId, setAccountId] = useState<number>(getInitialAccountId);
   const theme = useMemo(() => getTheme(mode), [mode]);
-  const { data, error, isLoading } = useDashboardData();
+  const { accounts } = useAccounts();
+  const { data, error, isLoading } = useDashboardData(accountId);
+
+  const handleSelectAccount = (nextAccountId: number) => {
+    setAccountId(nextAccountId);
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, String(nextAccountId));
+  };
 
   const toggleMode = () => {
     setMode((prev) => {
@@ -47,12 +62,6 @@ export default function App() {
     () => computeTradeStats(data?.closedTrades ?? []),
     [data?.closedTrades],
   );
-
-  // ข้อความ empty state ต้องผูกกับสถานะจริงของ EA ที่เลือกอยู่ (ไม่ hardcode
-  // ชื่อ/id เดิมที่มาจาก mock data — id จริงจาก backend เป็นตัวเลข ไม่ใช่ "scalp")
-  const selectedEa = data?.eaStatuses.find((ea) => ea.id === eaFilter);
-  const notDeployedMessage =
-    selectedEa?.state === "not_deployed" ? `${selectedEa.name} ยังไม่ deploy — ไม่มีข้อมูล` : null;
 
   return (
     <ThemeProvider theme={theme}>
@@ -80,8 +89,13 @@ export default function App() {
               connection={data.connection}
               lastSyncedAt={data.lastSyncedAt}
               brokerTime={data.brokerTime}
+              localTime={data.localTime}
               mode={mode}
               onToggleMode={toggleMode}
+              accountInfo={data.accountInfo}
+              accounts={accounts}
+              selectedAccountId={accountId}
+              onSelectAccount={handleSelectAccount}
             />
 
             <StatusBanners connection={data.connection} eaStatuses={data.eaStatuses} />
@@ -108,12 +122,20 @@ export default function App() {
                   positions={data.openPositions}
                   connection={data.connection}
                   eaFilter={eaFilter}
-                  emptyMessage={notDeployedMessage ?? "ยังไม่มีไม้เปิดวันนี้"}
+                  emptyMessage={
+                    eaFilter === "scalp"
+                      ? "Scalping ยังไม่ deploy — ไม่มีข้อมูล"
+                      : "ยังไม่มีไม้เปิดวันนี้"
+                  }
                 />
                 <TradeHistoryCard
                   trades={data.closedTrades}
                   eaFilter={eaFilter}
-                  emptyMessage={notDeployedMessage ?? "ยังไม่มีประวัติการเทรดวันนี้"}
+                  emptyMessage={
+                    eaFilter === "scalp"
+                      ? "Scalping ยังไม่ deploy — ไม่มีข้อมูล"
+                      : "ยังไม่มีประวัติการเทรดวันนี้"
+                  }
                   winRatePct={stats.winRatePct}
                   profitFactor={stats.profitFactor}
                 />
@@ -127,7 +149,7 @@ export default function App() {
             </Box>
 
             <Typography variant="caption" color="text.disabled" textAlign="center">
-              EA Console · อัปเดตข้อมูลอัตโนมัติทุก 10 วินาที
+              EA Console · เชื่อมต่อ backend จริงแล้ว
             </Typography>
           </Stack>
         ) : null}

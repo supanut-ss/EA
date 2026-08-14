@@ -2,8 +2,9 @@
 setlocal
 
 REM ============================================================
-REM  XAUUSD Trend/Breakout EA - Headless Compile + Backtest
+REM  XAUUSD Trend/Breakout EA - Headless Compile + Optimization
 REM  Runs metaeditor64.exe /compile and terminal64.exe /config
+REM  (genetic optimization via tester_config_optimize.ini).
 REM  No clicking inside MT5 or MetaEditor is required to run this.
 REM ============================================================
 
@@ -47,16 +48,19 @@ type "%~dp0compile_log.txt"
 echo ----------------------------
 findstr /C:"0 error" "%~dp0compile_log.txt" >nul
 if errorlevel 1 (
-    echo [WARNING] Compile log does not show "0 error" - check the log above before trusting the test results.
+    echo [WARNING] Compile log does not show "0 error" - check the log above before trusting the optimization results.
     pause
 )
 
-echo [3/3] Running Strategy Tester (headless, terminal will close itself when done)...
-"%MT5DIR%\terminal64.exe" /config:"%~dp0tester_config.ini"
+echo [3/3] Running Strategy Tester genetic optimization (headless, terminal will close itself when done)...
+echo         NOTE: this can take a long time. If progress stalls near the start, check
+echo         free RAM (each local agent needs ~900MB+ for tick data) and reduce the
+echo         agent count in MT5 Tools ^> Options ^> Strategy Tester Agents if needed.
+"%MT5DIR%\terminal64.exe" /config:"%~dp0tester_config_optimize.ini"
 
 echo.
-echo Done. Look for the report in your Data Folder, usually under:
+echo Done. Look for the optimization report in your Data Folder, usually under:
 echo   %DATAFOLDER%\Tester\
-echo (file name starts with "XAUUSD_TrendBreakout_Report")
-echo Copy that .htm report back into the shared EA folder and share it back.
+echo (file name starts with "XAUUSD_TrendBreakout_Optimize")
+echo Copy that .htm/.xml report back into the shared EA folder and share it back.
 pause

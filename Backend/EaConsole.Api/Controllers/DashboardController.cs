@@ -19,4 +19,13 @@ public class DashboardController(IDashboardQueryService dashboardQueryService) :
 
         return Ok(snapshot);
     }
+
+    // GET /api/dashboard/accounts — รายชื่อบัญชีทั้งหมดที่ลงทะเบียนไว้ ให้
+    // frontend ใช้สร้าง account picker (multi-account support)
+    [HttpGet("accounts")]
+    public async Task<IActionResult> GetAccounts(CancellationToken ct)
+    {
+        var accounts = await dashboardQueryService.GetAccountsAsync(ct);
+        return Ok(accounts);
+    }
 }

@@ -1,5 +1,6 @@
 using EaConsole.Api.Data;
 using EaConsole.Api.Services;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,6 +21,7 @@ builder.Services.AddDbContext<EaConsoleDbContext>(options =>
 
 builder.Services.AddScoped<IDashboardQueryService, DashboardQueryService>();
 builder.Services.AddScoped<IIngestService, IngestService>();
+builder.Services.AddHostedService<SnapshotRetentionService>();
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options =>
@@ -34,16 +36,79 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// ต้องอยู่ก่อน middleware อื่นที่สนใจ scheme/remote IP จริง — จำเป็นเมื่อ
+// deploy หลัง reverse proxy/load balancer (nginx, IIS, หรือ PaaS ส่วนใหญ่)
+// ที่ terminate TLS ให้แล้วส่งต่อมาเป็น HTTP ข้างใน ไม่ใส่ตัวนี้ app จะเห็น
+// ทุก request เป็น HTTP เสมอและไม่รู้ remote IP จริงของผู้เรียก
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+});
+
+// Real incident (2026-08-13): EA2's InpIngestBaseUrl was misconfigured with
+// a trailing slash ("https://.../" + "/api/ingest/snapshot" = a literal
+// "//api/ingest/snapshot"). ASP.NET Core's router treats the doubled slash
+// as a distinct, non-matching path - not "the same route", just 404 - so
+// every heartbeat silently failed with no data ever reaching the DB. A
+// stray slash in a client config is exactly the kind of thing that WILL
+// happen again (copy-paste, re-entering settings), so collapse repeated
+// slashes here rather than trusting every client to get the URL exactly
+// right forever.
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value;
+    if (!string.IsNullOrEmpty(path) && path.Contains("//"))
+    {
+        while (path.Contains("//")) path = path.Replace("//", "/");
+        context.Request.Path = path;
+    }
+    await next();
+});
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
+// Serve the built Frontend (Vite dist output) from wwwroot for the
+// single-host deploy (deploy.ps1 copies Frontend/dist into wwwroot before
+// `dotnet publish`) — no-op in local dev since wwwroot stays empty there
+// (dev uses the separate Vite dev server on :5173 instead, via CORS above).
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// Health check endpoint สำหรับ platform ที่ deploy จริง (load balancer /
+// uptime monitor / container healthcheck ส่วนใหญ่ต้องการ endpoint แบบนี้)
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
 // ตั้งใจไม่ใส่ UseHttpsRedirection ตอนนี้ — dev server รันเป็น HTTP ตรงๆ
-// คู่กับ Vite frontend (http://localhost:5173) เวลา deploy จริงค่อยให้
-// reverse proxy (nginx/IIS) เป็นคน terminate TLS แทน
+// คู่กับ Vite frontend (http://localhost:5173) เวลา deploy จริงให้
+// reverse proxy (nginx/IIS) หรือ PaaS เป็นคน terminate TLS แทน
 app.UseCors("Frontend");
+
+// Gate เฉพาะ endpoint ที่ EA ยิงเข้ามา (/api/ingest ของ EA1/EA2, /api/signals
+// ของ EA3) ด้วย shared API key ก่อน deploy จริง — ตอนนี้ปิดอยู่โดย default
+// (Ingest:ApiKey ว่าง = ไม่เช็ค, พฤติกรรมเดิมเป๊ะสำหรับ dev บน localhost)
+// ตั้งค่า Ingest:ApiKey (หรือ env var Ingest__ApiKey) แล้ว EA ต้องส่ง header
+// X-Api-Key มาให้ตรงกันถึงจะผ่าน — endpoint ฝั่งอ่าน (Dashboard) ไม่โดน gate
+// นี้ เพราะ frontend เรียกจาก browser ผ่าน CORS ไม่มีที่เก็บ secret ให้ปลอดภัย
+var ingestApiKey = app.Configuration["Ingest:ApiKey"];
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+    bool isGatedPath = path.StartsWithSegments("/api/ingest") || path.StartsWithSegments("/api/signals");
+    if (!string.IsNullOrEmpty(ingestApiKey) && isGatedPath)
+    {
+        if (!context.Request.Headers.TryGetValue("X-Api-Key", out var provided) || provided != ingestApiKey)
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+    }
+    await next();
+});
+
 app.UseAuthorization();
 app.MapControllers();
 

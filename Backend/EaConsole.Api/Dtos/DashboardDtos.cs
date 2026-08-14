@@ -15,6 +15,7 @@ public record DashboardSnapshotDto(
     string Connection,
     DateTime LastSyncedAt,
     string BrokerTime,
+    AccountInfoDto AccountInfo,
     AccountSummaryDto Account,
     List<EquityPointDto> EquityCurve,
     List<PositionDto> OpenPositions,
@@ -22,6 +23,27 @@ public record DashboardSnapshotDto(
     List<EaStatusDto> EaStatuses,
     RiskSnapshotDto Risk,
     List<ActivityLogEntryDto> ActivityLog
+);
+
+// Identity of the account this snapshot belongs to - lets the frontend
+// show which real MT5 account/broker is being viewed instead of a
+// hardcoded label (see AccountListItemDto below for the picker list).
+public record AccountInfoDto(
+    int AccountId,
+    long Mt5Login,
+    string BrokerName,
+    bool IsDemo
+);
+
+// One row for the account picker (GET /api/dashboard/accounts) - every
+// account currently registered in the accounts table, regardless of
+// whether it has any snapshots/trades yet.
+public record AccountListItemDto(
+    int AccountId,
+    long Mt5Login,
+    string BrokerName,
+    string ServerName,
+    bool IsDemo
 );
 
 public record AccountSummaryDto(

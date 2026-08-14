@@ -1,40 +1,49 @@
-import { useEffect, useState } from "react";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import IconButton from "@mui/material/IconButton";
+import MenuItem from "@mui/material/MenuItem";
+import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
-import type { ConnectionState } from "../types/dashboard";
-import { formatRelativeTimeThai } from "../utils/format";
+import type { AccountInfo, AccountListItem, ConnectionState } from "../types/dashboard";
 
 interface TopBarProps {
   connection: ConnectionState;
   lastSyncedAt: string;
   brokerTime: string;
+  localTime: string;
   mode: "light" | "dark";
   onToggleMode: () => void;
+  accountInfo: AccountInfo;
+  accounts: AccountListItem[];
+  selectedAccountId: number;
+  onSelectAccount: (accountId: number) => void;
+}
+
+function accountLabel(a: { mt5Login: number; brokerName: string; isDemo: boolean }): string {
+  return `${a.isDemo ? "Demo" : "Live"} #${a.mt5Login} · ${a.brokerName}`;
 }
 
 export default function TopBar({
   connection,
   lastSyncedAt,
   brokerTime,
+  localTime,
   mode,
   onToggleMode,
+  accountInfo,
+  accounts,
+  selectedAccountId,
+  onSelectAccount,
 }: TopBarProps) {
   const connected = connection === "connected";
 
-  // เวลาท้องถิ่นเป็นเรื่องของเครื่องผู้ดูเท่านั้น — คำนวณฝั่ง client ตรงๆ
-  // ไม่รับมาจาก backend (backend ไม่มีทางรู้ timezone ของคนเปิดหน้าจอ)
-  const [localTime, setLocalTime] = useState(() => new Date());
-  useEffect(() => {
-    const id = setInterval(() => setLocalTime(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const localTimeLabel = localTime.toLocaleTimeString("th-TH", { hour12: false });
+  const handleAccountChange = (event: SelectChangeEvent<number>) => {
+    onSelectAccount(Number(event.target.value));
+  };
 
   return (
     <Stack
@@ -53,12 +62,32 @@ export default function TopBar({
           Console
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          MT5 · Demo #51234789 · Broker XM Global
+          MT5 ·
         </Typography>
+        {accounts.length > 1 ? (
+          <Select
+            size="small"
+            variant="standard"
+            value={selectedAccountId}
+            onChange={handleAccountChange}
+            disableUnderline
+            sx={{ fontSize: "0.75rem", color: "text.secondary" }}
+          >
+            {accounts.map((a) => (
+              <MenuItem key={a.accountId} value={a.accountId} sx={{ fontSize: "0.8125rem" }}>
+                {accountLabel(a)}
+              </MenuItem>
+            ))}
+          </Select>
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            {accountLabel(accountInfo)}
+          </Typography>
+        )}
       </Stack>
 
       <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1}>
-        <Tooltip title={`Broker ${brokerTime} · Local ${localTimeLabel}`}>
+        <Tooltip title={`Broker ${brokerTime} · Local ${localTime}`}>
           <Chip
             size="small"
             color={connected ? "success" : "error"}
@@ -66,7 +95,7 @@ export default function TopBar({
             label={connected ? "Terminal Connected" : "Terminal Disconnected"}
           />
         </Tooltip>
-        <Chip size="small" variant="outlined" label={`Synced ${formatRelativeTimeThai(lastSyncedAt)}`} />
+        <Chip size="small" variant="outlined" label={`Synced ${lastSyncedAt}`} />
         <IconButton
           size="small"
           onClick={onToggleMode}

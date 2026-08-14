@@ -101,12 +101,12 @@ public class EaConsoleDbContext(DbContextOptions<EaConsoleDbContext> options) : 
                 .HasConversion(v => v.ToDb(), v => EnumDbMaps.TradeStatusFromDb(v))
                 .HasColumnType("enum('OPEN','CLOSED')");
 
+            // Free text, not an enum - see Trade.cs::CloseReason for why
+            // (EA3 sends its own descriptive reasons that don't fit a
+            // fixed set).
             e.Property(x => x.CloseReason)
                 .HasColumnName("close_reason")
-                .HasConversion(
-                    v => v.HasValue ? v.Value.ToDb() : null,
-                    v => v == null ? (TradeCloseReason?)null : EnumDbMaps.TradeCloseReasonFromDb(v))
-                .HasColumnType("enum('TP','SL','TRAILING_STOP','MANUAL','EA_LOGIC','OTHER')");
+                .HasColumnType("varchar(50)");
 
             e.HasOne(x => x.Account).WithMany(a => a.Trades)
                 .HasForeignKey(x => x.AccountId).OnDelete(DeleteBehavior.Cascade);
