@@ -1,0 +1,27 @@
+{
+  "environment": "production",
+  "protocol": "FTPS",
+  "host": null,
+  "remoteRoot": "ea.thaipesleague.com",
+  "wwwrootRelativePath": "wwwroot",
+  "healthUrl": "https://ea.thaipesleague.com/health",
+  "frontendUrl": "https://ea.thaipesleague.com/",
+  "maxParallelUploads": 4,
+  "operationTimeoutSeconds": 60,
+  "dllUnlockTimeoutSeconds": 45,
+  "lockStaleMinutes": 15,
+  "lockHeartbeatSeconds": 60,
+  "retryDelaysSeconds": [1, 3, 7],
+  "healthCheckRetrySeconds": 2,
+  "healthCheckTimeoutSeconds": 60,
+  "deleteSafetyLimitCount": 50,
+  "deleteSafetyLimitPct": 20,
+  "protectedPaths": [
+    ".env", ".env.*",
+    "uploads/", "storage/", "logs/", "sessions/", "cache/",
+    "*.mdf", "*.ldf", "*.ndf", "*.bak", "*.sqlite", "*.sqlite3", "*.db"
+  ],
+  "runtimeSensitivePatterns": [
+    "*.dll", "*.exe", "*.deps.json", "*.runtimeconfig.json"
+  ]
+}

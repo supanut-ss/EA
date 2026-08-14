@@ -35,6 +35,15 @@ Backend/EaConsole.Api/wwwroot/
 # uploads - machine-specific optimization state, not meaningful to share) ----------
 /.deploy-cache/
 
+# ---------- New FTPS deploy system (deployment/) runtime output - build
+# artifacts, downloaded remote manifests, local logs; never commit. The
+# scripts themselves live in /deployment/ (tracked) and are unaffected. ----------
+/.deploy/
+
+# ---------- Local deploy credentials wrapper - deployment/run-deploy.local.ps1
+# holds real FTP/DB/API secrets filled in by hand, never commit it ----------
+deployment/*.local.ps1
+
 # ---------- SQL local data / dumps ----------
 *.mdf
 *.ldf

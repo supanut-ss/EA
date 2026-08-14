@@ -80,7 +80,12 @@ app.UseStaticFiles();
 
 // Health check endpoint สำหรับ platform ที่ deploy จริง (load balancer /
 // uptime monitor / container healthcheck ส่วนใหญ่ต้องการ endpoint แบบนี้)
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+// "release" มาจาก Release:Id (env var Release__Id ที่ deploy/build.ps1 เขียน
+// ลง web.config ตอน build) - ให้ deploy script poll endpoint นี้หลัง deploy
+// จนกว่า release ที่ตอบกลับจะตรงกับตัวที่เพิ่ง ship แทนที่จะเชื่อแค่ HTTP 200
+// เฉยๆ (process เก่าอาจยังตอบ 200 อยู่ระหว่างที่ IIS กำลัง recycle ไป process ใหม่)
+app.MapGet("/health", (IConfiguration config) =>
+    Results.Ok(new { status = "ok", release = config["Release:Id"] ?? "unknown" }));
 
 // ตั้งใจไม่ใส่ UseHttpsRedirection ตอนนี้ — dev server รันเป็น HTTP ตรงๆ
 // คู่กับ Vite frontend (http://localhost:5173) เวลา deploy จริงให้

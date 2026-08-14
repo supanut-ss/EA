@@ -1,0 +1,10 @@
+# Build artifacts that must never be part of a release, even if they land in
+# an output directory by accident. One glob per line, matched against the
+# path relative to the build output root (frontend or backend separately).
+.git/
+.vscode/
+node_modules/
+*.pdb
+*.log
+*.user
+appsettings.Development.json
