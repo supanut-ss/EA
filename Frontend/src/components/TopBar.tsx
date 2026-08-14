@@ -1,49 +1,24 @@
 import Box from "@mui/material/Box";
-import Chip from "@mui/material/Chip";
 import IconButton from "@mui/material/IconButton";
-import MenuItem from "@mui/material/MenuItem";
-import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
-import type { AccountInfo, AccountListItem, ConnectionState } from "../types/dashboard";
 
 interface TopBarProps {
-  connection: ConnectionState;
-  lastSyncedAt: string;
-  brokerTime: string;
-  localTime: string;
   mode: "light" | "dark";
   onToggleMode: () => void;
-  accountInfo: AccountInfo;
-  accounts: AccountListItem[];
-  selectedAccountId: number;
-  onSelectAccount: (accountId: number) => void;
+  connectedCount: number;
+  totalCount: number;
 }
 
-function accountLabel(a: { mt5Login: number; brokerName: string; isDemo: boolean }): string {
-  return `${a.isDemo ? "Demo" : "Live"} #${a.mt5Login} · ${a.brokerName}`;
-}
-
-export default function TopBar({
-  connection,
-  lastSyncedAt,
-  brokerTime,
-  localTime,
-  mode,
-  onToggleMode,
-  accountInfo,
-  accounts,
-  selectedAccountId,
-  onSelectAccount,
-}: TopBarProps) {
-  const connected = connection === "connected";
-
-  const handleAccountChange = (event: SelectChangeEvent<number>) => {
-    onSelectAccount(Number(event.target.value));
-  };
+// เดิม TopBar มี dropdown เลือกบัญชีเดียวมาดู - เอาออกแล้วเพราะตอนนี้ทุกบัญชี
+// แสดงพร้อมกันในหน้าเดียว (ดู PortfolioOverviewStrip + AccountSection ใน
+// App.tsx) เหลือแค่ควบคุมระดับหน้าจอจริง ๆ (โหมดสี) กับสรุปสถานะรวมสั้น ๆ
+export default function TopBar({ mode, onToggleMode, connectedCount, totalCount }: TopBarProps) {
+  const allConnected = totalCount > 0 && connectedCount === totalCount;
+  const noneConnected = connectedCount === 0;
 
   return (
     <Stack
@@ -53,49 +28,37 @@ export default function TopBar({
       justifyContent="space-between"
       gap={2}
     >
-      <Stack direction="row" alignItems="baseline" gap={1.25}>
-        <Typography variant="h6" fontWeight={700} letterSpacing="-0.01em">
-          XAU
-          <Box component="span" sx={{ color: "primary.main" }}>
-            EA
-          </Box>{" "}
-          Console
-        </Typography>
-        <Typography variant="caption" color="text.secondary">
-          MT5 ·
-        </Typography>
-        {accounts.length > 1 ? (
-          <Select
-            size="small"
-            variant="standard"
-            value={selectedAccountId}
-            onChange={handleAccountChange}
-            disableUnderline
-            sx={{ fontSize: "0.75rem", color: "text.secondary" }}
-          >
-            {accounts.map((a) => (
-              <MenuItem key={a.accountId} value={a.accountId} sx={{ fontSize: "0.8125rem" }}>
-                {accountLabel(a)}
-              </MenuItem>
-            ))}
-          </Select>
-        ) : (
-          <Typography variant="caption" color="text.secondary">
-            {accountLabel(accountInfo)}
-          </Typography>
-        )}
-      </Stack>
+      <Typography variant="h6" fontWeight={700} letterSpacing="-0.01em">
+        XAU
+        <Box component="span" sx={{ color: "primary.main" }}>
+          EA
+        </Box>{" "}
+        Console
+      </Typography>
 
-      <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1}>
-        <Tooltip title={`Broker ${brokerTime} · Local ${localTime}`}>
-          <Chip
-            size="small"
-            color={connected ? "success" : "error"}
-            variant="outlined"
-            label={connected ? "Terminal Connected" : "Terminal Disconnected"}
-          />
-        </Tooltip>
-        <Chip size="small" variant="outlined" label={`Synced ${lastSyncedAt}`} />
+      <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1.25}>
+        {totalCount > 0 && (
+          <Tooltip title="อัปเดตข้อมูลอัตโนมัติทุก 10 วินาที แบบไม่รบกวนหน้าจอ">
+            <Stack direction="row" alignItems="center" gap={0.75}>
+              <Box
+                sx={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  bgcolor: allConnected ? "success.main" : noneConnected ? "error.main" : "warning.main",
+                  animation: "ea-pulse 2s ease-in-out infinite",
+                  "@keyframes ea-pulse": {
+                    "0%, 100%": { opacity: 1 },
+                    "50%": { opacity: 0.35 },
+                  },
+                }}
+              />
+              <Typography variant="caption" color="text.secondary">
+                {connectedCount}/{totalCount} เชื่อมต่อ
+              </Typography>
+            </Stack>
+          </Tooltip>
+        )}
         <IconButton
           size="small"
           onClick={onToggleMode}
