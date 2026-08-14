@@ -33,11 +33,25 @@
 #ifndef EA_INGEST_CLIENT_MQH
 #define EA_INGEST_CLIENT_MQH
 
+// Per-EA defaults: #include is textual, so a single default here applies
+// to every EA that includes this file - wrong for InpIngestBaseUrl/EaId,
+// which genuinely differ per EA/deployment. Each including .mq5 can
+// #define these BEFORE #include <EaIngestClient.mqh> to override just its
+// own default; anything not overridden falls back to the values below
+// (which stay dev-safe: localhost + EaId 1, matching the original
+// behavior for any EA that doesn't opt in).
+#ifndef INGEST_DEFAULT_BASE_URL
+   #define INGEST_DEFAULT_BASE_URL "http://localhost:5008"
+#endif
+#ifndef INGEST_DEFAULT_EA_ID
+   #define INGEST_DEFAULT_EA_ID 1
+#endif
+
 input group "=== Backend Ingest (EA Console) ==="
 input bool     InpIngestEnabled      = false;                      // Enable sending data to backend (OFF by default - see notes above)
-input string   InpIngestBaseUrl      = "http://localhost:5008";    // Backend base URL, no trailing slash (see Backend/EaConsole.Api/Properties/launchSettings.json)
+input string   InpIngestBaseUrl      = INGEST_DEFAULT_BASE_URL;    // Backend base URL, no trailing slash (see Backend/EaConsole.Api/Properties/launchSettings.json)
 input int      InpIngestAccountId    = 1;                          // AccountId in the backend DB
-input int      InpIngestEaId         = 1;                          // EaId in the backend DB (must differ per EA)
+input int      InpIngestEaId         = INGEST_DEFAULT_EA_ID;       // EaId in the backend DB (must differ per EA)
 input int      InpIngestHeartbeatSec = 10;                         // Heartbeat interval, seconds
 input int      InpIngestTimeoutMs    = 5000;                       // WebRequest timeout, ms
 input string   InpIngestApiKey       = "";                         // X-Api-Key header (leave blank if backend's Ingest:ApiKey is unset)

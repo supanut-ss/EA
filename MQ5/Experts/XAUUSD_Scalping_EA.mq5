@@ -48,6 +48,13 @@
 #property strict
 
 #include <Trade\Trade.mqh>
+
+// This EA's own ingest defaults - matches its real registration in the
+// backend DB (ea_id=2, "Scalping & Session") and the live production
+// host, so a fresh attach no longer needs manual reconfiguration (see
+// EaIngestClient.mqh for how these override the shared fallback).
+#define INGEST_DEFAULT_EA_ID 2
+#define INGEST_DEFAULT_BASE_URL "https://ea.thaipesleague.com"
 #include <EaIngestClient.mqh>
 
 CTrade trade;
