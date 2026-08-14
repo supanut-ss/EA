@@ -383,7 +383,7 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp, string comment)
       Print("Trade opened: ", EnumToString(type), " Lots=", InpLotSize, " SL=", sl, " TP=", tp);
 
       ulong dealTicket = trade.ResultDeal();
-      if(HistoryDealSelect(dealTicket))
+      if(IngestHistoryDealSelectRetry(dealTicket))
       {
          ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
          double openPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);

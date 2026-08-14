@@ -81,6 +81,31 @@ string IngestJsonEscape(string s)
 }
 
 //+------------------------------------------------------------------+
+// Real incident (2026-08-14): trades were executing fine (visible in
+// History) but NEVER showed up as either "reported" or "returned HTTP"
+// in the Experts log - meaning the ingest call was never even attempted.
+// Root cause: HistoryDealSelect() was called immediately after
+// trade.Buy()/Sell()/OnTradeTransaction() fired, but MT5's local history
+// cache can lag the actual execution by a tick or two. A failed lookup
+// silently skipped the whole reporting block with no error printed at
+// all. Retry with a short pause instead of a single immediate attempt,
+// and warn (loudly, once) if it still isn't there after that - a report
+// that never fires needs to be visible, not silent.
+//+------------------------------------------------------------------+
+bool IngestHistoryDealSelectRetry(ulong dealTicket, int maxAttempts = 5, int delayMs = 100)
+{
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      HistorySelect(0, TimeCurrent()); // refresh the local history cache before each retry
+      if(HistoryDealSelect(dealTicket)) return true;
+      if(attempt < maxAttempts) Sleep(delayMs);
+   }
+   Print("Ingest: WARNING - deal #", dealTicket, " not found in history after ", maxAttempts,
+         " attempts (", (maxAttempts * delayMs), "ms) - trade report SKIPPED for this event");
+   return false;
+}
+
+//+------------------------------------------------------------------+
 bool IngestSend(string method, string path, string jsonBody)
 {
    if(!InpIngestEnabled) return false;
@@ -275,7 +300,7 @@ void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicN
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
 
    ulong dealTicket = trans.deal;
-   if(!HistoryDealSelect(dealTicket)) return;
+   if(!IngestHistoryDealSelectRetry(dealTicket)) return;
    if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != symbol) return;
    if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != magicNumber) return;
 

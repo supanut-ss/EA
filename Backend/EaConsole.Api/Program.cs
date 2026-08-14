@@ -45,6 +45,26 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
 });
 
+// Real incident (2026-08-13): EA2's InpIngestBaseUrl was misconfigured with
+// a trailing slash ("https://.../" + "/api/ingest/snapshot" = a literal
+// "//api/ingest/snapshot"). ASP.NET Core's router treats the doubled slash
+// as a distinct, non-matching path - not "the same route", just 404 - so
+// every heartbeat silently failed with no data ever reaching the DB. A
+// stray slash in a client config is exactly the kind of thing that WILL
+// happen again (copy-paste, re-entering settings), so collapse repeated
+// slashes here rather than trusting every client to get the URL exactly
+// right forever.
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value;
+    if (!string.IsNullOrEmpty(path) && path.Contains("//"))
+    {
+        while (path.Contains("//")) path = path.Replace("//", "/");
+        context.Request.Path = path;
+    }
+    await next();
+});
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
