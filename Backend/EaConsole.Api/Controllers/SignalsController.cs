@@ -11,7 +11,9 @@ namespace EaConsole.Api.Controllers;
 // accountId/eaId ในตัว payload เลย) เพราะ EA3 hardcode path/shape พวกนี้ไว้แล้ว
 // จากโปรเจกต์ ATS เดิม เราแค่ทำ backend ฝั่งนี้ให้เข้ากันได้ ไม่ได้แก้ EA
 //
-// - accountId คงที่ที่ 1 (ระบบบัญชีเดียว เหมือน IngestController)
+// - accountId คงที่ (EA3's payload ไม่มี accountId ให้เลือกเอง ต่างจาก
+//   IngestController ที่ EA1/EA2 ส่ง accountId มาเอง) — ผูกกับ account_id=2
+//   (Exness-MT5Real8 login 411757774, บัญชี Live แยกจาก EA1/EA2)
 // - eaId คงที่ที่ EA3_ID (ต้องมีแถวใน eas table รอไว้แล้ว ea_id=3, magic=88188)
 // - ไม่มี authentication แบบเดียวกับ IngestController — ใช้ Ingest:ApiKey gate
 //   เดียวกันที่ Program.cs (ขยาย path ให้ครอบคลุม /api/signals ด้วยแล้ว)
@@ -19,7 +21,10 @@ namespace EaConsole.Api.Controllers;
 [Route("api/signals")]
 public class SignalsController(EaConsoleDbContext db) : ControllerBase
 {
-    private const int AccountId = 1;
+    // 2026-08-14: moved to its own real Live account (Exness-MT5Real8,
+    // login 411757774, account_id=2) - was account_id=1 (shared with
+    // EA1/EA2's Exness demo) before this account existed.
+    private const int AccountId = 2;
     private const int Ea3Id = 3;
 
     // EA3 polls this every InpPollInterval ms (default 10s) with account state.
