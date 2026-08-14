@@ -18,10 +18,13 @@ import RiskSnapshotCard from "./components/RiskSnapshotCard";
 import ActivityLogCard from "./components/ActivityLogCard";
 
 import { useDashboardData } from "./hooks/useDashboardData";
+import { useAccounts } from "./hooks/useAccounts";
 import { getTheme } from "./theme";
 import { computeTradeStats } from "./utils/stats";
 
 const MODE_STORAGE_KEY = "ea-console-theme-mode";
+const ACCOUNT_STORAGE_KEY = "ea-console-account-id";
+const DEFAULT_ACCOUNT_ID = 1;
 
 function getInitialMode(): PaletteMode {
   const stored = localStorage.getItem(MODE_STORAGE_KEY);
@@ -29,11 +32,23 @@ function getInitialMode(): PaletteMode {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function getInitialAccountId(): number {
+  const stored = Number(localStorage.getItem(ACCOUNT_STORAGE_KEY));
+  return Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_ACCOUNT_ID;
+}
+
 export default function App() {
   const [mode, setMode] = useState<PaletteMode>(getInitialMode);
   const [eaFilter, setEaFilter] = useState("all");
+  const [accountId, setAccountId] = useState<number>(getInitialAccountId);
   const theme = useMemo(() => getTheme(mode), [mode]);
-  const { data, error, isLoading } = useDashboardData();
+  const { accounts } = useAccounts();
+  const { data, error, isLoading } = useDashboardData(accountId);
+
+  const handleSelectAccount = (nextAccountId: number) => {
+    setAccountId(nextAccountId);
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, String(nextAccountId));
+  };
 
   const toggleMode = () => {
     setMode((prev) => {
@@ -77,6 +92,10 @@ export default function App() {
               localTime={data.localTime}
               mode={mode}
               onToggleMode={toggleMode}
+              accountInfo={data.accountInfo}
+              accounts={accounts}
+              selectedAccountId={accountId}
+              onSelectAccount={handleSelectAccount}
             />
 
             <StatusBanners connection={data.connection} eaStatuses={data.eaStatuses} />

@@ -1,12 +1,14 @@
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import IconButton from "@mui/material/IconButton";
+import MenuItem from "@mui/material/MenuItem";
+import Select, { type SelectChangeEvent } from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
-import type { ConnectionState } from "../types/dashboard";
+import type { AccountInfo, AccountListItem, ConnectionState } from "../types/dashboard";
 
 interface TopBarProps {
   connection: ConnectionState;
@@ -15,6 +17,14 @@ interface TopBarProps {
   localTime: string;
   mode: "light" | "dark";
   onToggleMode: () => void;
+  accountInfo: AccountInfo;
+  accounts: AccountListItem[];
+  selectedAccountId: number;
+  onSelectAccount: (accountId: number) => void;
+}
+
+function accountLabel(a: { mt5Login: number; brokerName: string; isDemo: boolean }): string {
+  return `${a.isDemo ? "Demo" : "Live"} #${a.mt5Login} · ${a.brokerName}`;
 }
 
 export default function TopBar({
@@ -24,8 +34,16 @@ export default function TopBar({
   localTime,
   mode,
   onToggleMode,
+  accountInfo,
+  accounts,
+  selectedAccountId,
+  onSelectAccount,
 }: TopBarProps) {
   const connected = connection === "connected";
+
+  const handleAccountChange = (event: SelectChangeEvent<number>) => {
+    onSelectAccount(Number(event.target.value));
+  };
 
   return (
     <Stack
@@ -44,8 +62,28 @@ export default function TopBar({
           Console
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          MT5 · Demo #51234789 · Broker XM Global
+          MT5 ·
         </Typography>
+        {accounts.length > 1 ? (
+          <Select
+            size="small"
+            variant="standard"
+            value={selectedAccountId}
+            onChange={handleAccountChange}
+            disableUnderline
+            sx={{ fontSize: "0.75rem", color: "text.secondary" }}
+          >
+            {accounts.map((a) => (
+              <MenuItem key={a.accountId} value={a.accountId} sx={{ fontSize: "0.8125rem" }}>
+                {accountLabel(a)}
+              </MenuItem>
+            ))}
+          </Select>
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            {accountLabel(accountInfo)}
+          </Typography>
+        )}
       </Stack>
 
       <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1}>

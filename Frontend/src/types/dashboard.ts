@@ -2,6 +2,23 @@ export type ConnectionState = "connected" | "disconnected";
 
 export type EaRuntimeState = "active" | "standby" | "error" | "not_deployed";
 
+export interface AccountInfo {
+  accountId: number;
+  mt5Login: number;
+  brokerName: string;
+  isDemo: boolean;
+}
+
+// One row in the account picker (GET /api/dashboard/accounts) - every
+// registered account, not just the one currently being viewed.
+export interface AccountListItem {
+  accountId: number;
+  mt5Login: number;
+  brokerName: string;
+  serverName: string;
+  isDemo: boolean;
+}
+
 export interface AccountSummary {
   balance: number;
   equity: number;
@@ -83,6 +100,7 @@ export interface DashboardSnapshot {
   lastSyncedAt: string;
   brokerTime: string;
   localTime: string;
+  accountInfo: AccountInfo;
   account: AccountSummary;
   equityCurve: EquityPoint[];
   openPositions: Position[];
