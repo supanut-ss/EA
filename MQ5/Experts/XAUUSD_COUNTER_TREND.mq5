@@ -20,6 +20,12 @@ input int      InpPollInterval         = 10000;                 // รอบเ�
 input int      InpSignalDedupDays      = 30;                    // เก็บผล signal ID เพื่อป้องกันเปิดซ้ำข้าม restart
 input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Tester server offset from UTC (for example 2 or 3)
 
+// account_id ในฝั่ง backend (ดู Backend/EaConsole.Api/Controllers/
+// SignalsController.cs - EA3's payload ไม่มี accountId ให้เลือกเอง เลย
+// hardcode ไว้ทั้งสองฝั่งให้ตรงกัน) 2026-08-14: ย้ายจาก account_id=1
+// (เดิมใช้ร่วมกับ EA1/EA2) ไปเป็นบัญชี Live จริงของตัวเอง (Exness-MT5Real8)
+#define ATS_BACKEND_ACCOUNT_ID 2
+
 input group "== Trade Settings =="
 input int      InpSlippage             = 20;                    // ระยะ Slippage สูงสุดที่ยอมรับได้ (Points)
 input int      InpMagic                = 88188;                 // หมายเลข Magic Number ของ EA สำหรับแยกแยะออเดอร์
@@ -744,6 +750,40 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
    ResetLastError();
    int h = WebRequest("POST", url, hdr, 3000, pd, rd, rh);
    if(h != 200) Print("ATS EA ERROR: Local sync HTTP=", h, " err=", GetLastError());
+}
+
+//+------------------------------------------------------------------+
+// Reports structure events (Pivot High/Low, CHoCH, ...) to the generic
+// /api/ingest/log endpoint so they show up on the dashboard's Activity
+// Log card, the same way EA1/EA2's IngestLog() does - EA3 doesn't share
+// EaIngestClient.mqh (its whole protocol is separate/pre-existing), so
+// this posts the equivalent payload shape directly. These events were
+// already being Print()'d locally (see ExecuteStrategyLogic) with no
+// backend visibility at all before this.
+//+------------------------------------------------------------------+
+string AtsJsonEscape(string s)
+{
+   StringReplace(s, "\\", "\\\\");
+   StringReplace(s, "\"", "\\\"");
+   return s;
+}
+
+void SendActivityLog(string level, string message)
+{
+   if(!IsExternalIntegrationAllowed()) return;
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   string eventTime = StringFormat("%04d-%02d-%02dT%02d:%02d:%02d", dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+
+   string url = backend_url + "/api/ingest/log";
+   string hdr = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
+   string pay = StringFormat("{\"accountId\":%d,\"eaId\":3,\"level\":\"%s\",\"message\":\"%s\",\"eventTimeBroker\":\"%s\"}",
+                              ATS_BACKEND_ACCOUNT_ID, level, AtsJsonEscape(message), eventTime);
+   char pd[], rd[]; string rh;
+   StringToCharArray(pay, pd, 0, StringLen(pay), CP_UTF8);
+   ResetLastError();
+   int h = WebRequest("POST", url, hdr, 3000, pd, rd, rh);
+   if(h != 200 && h != 202) Print("ATS EA ERROR: Activity log HTTP=", h, " err=", GetLastError());
 }
 
 void SyncPositionsWithBackend()
@@ -1739,13 +1779,23 @@ void ExecuteStrategyLogic()
    }
    if(iph) {
       prev_ph=last_ph; last_ph=hi[ti];
-      if(trend==1&&prev_ph>0&&last_ph<prev_ph) { SetBearishCHoCH(); Print("ATS EA: Bearish CHoCH PH ",last_ph," < ",prev_ph); }
+      if(trend==1&&prev_ph>0&&last_ph<prev_ph) {
+         SetBearishCHoCH();
+         Print("ATS EA: Bearish CHoCH PH ",last_ph," < ",prev_ph);
+         SendActivityLog("info", StringFormat("Bearish CHoCH — Pivot High %s < previous %s", DoubleToString(last_ph,2), DoubleToString(prev_ph,2)));
+      }
       Print("ATS EA: Pivot High ",last_ph);
+      SendActivityLog("info", StringFormat("Pivot High %s", DoubleToString(last_ph,2)));
    }
    if(ipl) {
       prev_pl=last_pl; last_pl=lo[ti];
-      if(trend==-1&&prev_pl>0&&last_pl>prev_pl) { SetBullishCHoCH(); Print("ATS EA: Bullish CHoCH PL ",last_pl," > ",prev_pl); }
+      if(trend==-1&&prev_pl>0&&last_pl>prev_pl) {
+         SetBullishCHoCH();
+         Print("ATS EA: Bullish CHoCH PL ",last_pl," > ",prev_pl);
+         SendActivityLog("info", StringFormat("Bullish CHoCH — Pivot Low %s > previous %s", DoubleToString(last_pl,2), DoubleToString(prev_pl,2)));
+      }
       Print("ATS EA: Pivot Low ",last_pl);
+      SendActivityLog("info", StringFormat("Pivot Low %s", DoubleToString(last_pl,2)));
    }
 
    // 2. BOS: require consecutive closed-bar confirmation and expire stale candidates.

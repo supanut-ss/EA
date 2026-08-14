@@ -124,7 +124,16 @@ bool IngestSend(string method, string path, string jsonBody)
 {
    if(!InpIngestEnabled) return false;
 
-   string url = InpIngestBaseUrl + path;
+   // Real incident (2026-08-14): InpIngestBaseUrl was set with a trailing
+   // slash, producing a literal "//api/..." that this host's web server
+   // rejects before the request even reaches the backend app - every
+   // heartbeat/trade 404'd silently for as long as it went unnoticed.
+   // XAUUSD_COUNTER_TREND.mq5 already strips this defensively at OnInit;
+   // do the same here regardless of what the input actually contains.
+   string baseUrl = InpIngestBaseUrl;
+   while(StringLen(baseUrl) > 0 && StringSubstr(baseUrl, StringLen(baseUrl)-1, 1) == "/")
+      baseUrl = StringSubstr(baseUrl, 0, StringLen(baseUrl)-1);
+   string url = baseUrl + path;
    string headers = "Content-Type: application/json\r\n";
    if(InpIngestApiKey != "")
       headers += "X-Api-Key: " + InpIngestApiKey + "\r\n";
