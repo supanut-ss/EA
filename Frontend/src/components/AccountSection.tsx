@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import Chip from "@mui/material/Chip";
@@ -15,10 +15,11 @@ import EaFilterBar from "./EaFilterBar";
 import EquityCurveCard from "./EquityCurveCard";
 import OpenPositionsCard from "./OpenPositionsCard";
 import TradeHistoryCard from "./TradeHistoryCard";
+import TradeSessionAnalytics from "./TradeSessionAnalytics";
 import EaStatusPanel from "./EaStatusPanel";
 import RiskSnapshotCard from "./RiskSnapshotCard";
 import ActivityLogCard from "./ActivityLogCard";
-import { computeTradeStats } from "../utils/stats";
+import { formatDateTime } from "../utils/format";
 
 interface AccountSectionProps {
   domId: string;
@@ -43,8 +44,6 @@ export default function AccountSection({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [eaFilter, setEaFilter] = useState("all");
 
-  const stats = useMemo(() => computeTradeStats(data?.closedTrades ?? []), [data?.closedTrades]);
-
   const connected = data?.connection === "connected";
   const label = `${info.isDemo ? "Demo" : "Live"} #${info.mt5Login} · ${info.brokerName}`;
 
@@ -67,7 +66,7 @@ export default function AccountSection({
           }
         }}
         sx={{
-          p: 2,
+          p: 1.5,
           cursor: "pointer",
           userSelect: "none",
           "&:focus-visible": {
@@ -86,14 +85,14 @@ export default function AccountSection({
               flexShrink: 0,
             }}
           />
-          <Typography variant="subtitle1" fontWeight={700} noWrap>
+          <Typography sx={{ fontSize: 14.5, fontWeight: 700 }} noWrap>
             {label}
           </Typography>
           {data && (
             <Chip
               size="small"
               variant="outlined"
-              label={`Synced ${data.lastSyncedAt}`}
+              label={`Synced ${formatDateTime(data.lastSyncedAt)}`}
               sx={{ display: { xs: "none", sm: "inline-flex" } }}
             />
           )}
@@ -110,7 +109,7 @@ export default function AccountSection({
       </Stack>
 
       <Collapse in={expanded} unmountOnExit={false}>
-        <Box sx={{ px: 2, pb: 2 }}>
+        <Box sx={{ px: 1.5, pb: 1.5 }}>
           {isLoading && !data ? (
             <Stack gap={1.5}>
               <Skeleton variant="rounded" height={90} />
@@ -121,20 +120,27 @@ export default function AccountSection({
               {error}
             </Typography>
           ) : data ? (
-            <Stack gap={2}>
+            <Stack gap={1.5}>
               <StatusBanners connection={data.connection} eaStatuses={data.eaStatuses} />
-              <SummaryStrip account={data.account} />
+              <SummaryStrip
+                account={data.account}
+                risk={data.risk}
+                openPositionsCount={data.openPositions.length}
+                totalLots={data.openPositions.reduce((sum, p) => sum + p.lot, 0)}
+                eaActiveCount={data.eaStatuses.filter((ea) => ea.state === "active").length}
+                eaTotalCount={data.eaStatuses.length}
+              />
               <EaFilterBar eaStatuses={data.eaStatuses} value={eaFilter} onChange={setEaFilter} />
 
               <Box
                 sx={{
                   display: "grid",
-                  gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) 320px" },
-                  gap: 2,
+                  gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) 300px" },
+                  gap: 1.5,
                   alignItems: "start",
                 }}
               >
-                <Stack gap={2} minWidth={0}>
+                <Stack gap={1.5} minWidth={0}>
                   <EquityCurveCard points={data.equityCurve} />
                   <OpenPositionsCard
                     positions={data.openPositions}
@@ -146,14 +152,14 @@ export default function AccountSection({
                     trades={data.closedTrades}
                     eaFilter={eaFilter}
                     emptyMessage="ยังไม่มีประวัติการเทรดวันนี้"
-                    winRatePct={stats.winRatePct}
-                    profitFactor={stats.profitFactor}
+                    performance={data.performance}
                   />
+                  <TradeSessionAnalytics trades={data.closedTrades} />
                 </Stack>
 
-                <Stack gap={2} minWidth={0}>
+                <Stack gap={1.5} minWidth={0}>
                   <EaStatusPanel eaStatuses={data.eaStatuses} />
-                  <RiskSnapshotCard risk={data.risk} />
+                  <RiskSnapshotCard risk={data.risk} account={data.account} />
                   <ActivityLogCard entries={data.activityLog} />
                 </Stack>
               </Box>

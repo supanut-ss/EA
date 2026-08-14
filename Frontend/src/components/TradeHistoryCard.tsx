@@ -13,7 +13,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Tabs from "@mui/material/Tabs";
 import Typography from "@mui/material/Typography";
-import type { ClosedTrade } from "../types/dashboard";
+import type { ClosedTrade, Performance } from "../types/dashboard";
 import { numericSx } from "../theme";
 import { formatPrice, formatUsd } from "../utils/format";
 
@@ -21,22 +21,27 @@ interface TradeHistoryCardProps {
   trades: ClosedTrade[];
   eaFilter: string;
   emptyMessage: string;
-  winRatePct: number;
-  profitFactor: number;
+  performance: Performance;
 }
 
-const RANGE_LABELS = ["วันนี้", "7 วัน", "30 วัน"];
+const RANGES: { label: string; key: keyof Performance }[] = [
+  { label: "วันนี้", key: "today" },
+  { label: "7 วัน", key: "last7d" },
+  { label: "30 วัน", key: "last30d" },
+];
 
 export default function TradeHistoryCard({
   trades,
   eaFilter,
   emptyMessage,
-  winRatePct,
-  profitFactor,
+  performance,
 }: TradeHistoryCardProps) {
-  // หมายเหตุ: ตอนนี้ทั้ง 3 แท็บใช้ข้อมูลชุดเดียวกัน (mock) — เมื่อต่อ backend จริง
-  // ให้ query ช่วงเวลาที่ต่างกันตาม range ที่เลือกแทน
+  // แท็บช่วงเวลาสลับเฉพาะ "สถิติ" ด้านบน (win rate/PF/expectancy ต่อช่วง
+  // จาก backend) - ตารางด้านล่างยังคงโชว์ trade ล่าสุด (30 วัน) เหมือนเดิม
+  // เพราะ closedAtBroker เป็น time-only ไม่มีวันที่ ทำให้ frontend แยก
+  // "ของวันนี้เท่านั้น" จากรายการดิบเองไม่ได้แม่นยำ
   const [range, setRange] = useState(0);
+  const stats = performance[RANGES[range].key];
   const filtered = eaFilter === "all" ? trades : trades.filter((t) => t.eaId === eaFilter);
 
   return (
@@ -47,7 +52,8 @@ export default function TradeHistoryCard({
             Trade History
           </Typography>
           <Typography variant="caption" color="text.disabled">
-            Win rate {winRatePct}% · PF {profitFactor}
+            Win rate {stats.winRatePct}% · PF {stats.profitFactor} · Expectancy{" "}
+            {formatUsd(stats.expectancy, true)}
           </Typography>
         </Stack>
 
@@ -56,8 +62,8 @@ export default function TradeHistoryCard({
           onChange={(_, v) => setRange(v)}
           sx={{ minHeight: 36, mb: 1, borderBottom: 1, borderColor: "divider" }}
         >
-          {RANGE_LABELS.map((label) => (
-            <Tab key={label} label={label} sx={{ minHeight: 36, textTransform: "none" }} />
+          {RANGES.map((r) => (
+            <Tab key={r.key} label={r.label} sx={{ minHeight: 36, textTransform: "none" }} />
           ))}
         </Tabs>
 

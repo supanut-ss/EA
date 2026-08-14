@@ -22,6 +22,7 @@ public record DashboardSnapshotDto(
     List<ClosedTradeDto> ClosedTrades,
     List<EaStatusDto> EaStatuses,
     RiskSnapshotDto Risk,
+    PerformanceDto Performance,
     List<ActivityLogEntryDto> ActivityLog
 );
 
@@ -116,8 +117,27 @@ public record ActivityLogEntryDto(
 
 public record RiskSnapshotDto(
     decimal MaxDrawdownTodayPct,
+    decimal MaxDrawdown30dPct,
     decimal OpenSlTotal,
     decimal OpenTpTotal,
     string AvgRiskReward,
     int CurrentSpreadPts
+);
+
+// สถิติผลงานต่อช่วงเวลา (วันนี้/7 วัน/30 วัน) — คำนวณจาก trades ตรงๆ ไม่พึ่ง
+// daily_performance เพราะตารางนั้นเติมผ่าน MySQL EVENT ซึ่ง event_scheduler
+// ปิดอยู่บน shared host นี้ (ดูหมายเหตุใน schema.sql) เชื่อถือไม่ได้ว่าจะมีข้อมูลครบ
+public record PerformanceRangeDto(
+    int TradesCount,
+    decimal WinRatePct,
+    decimal ProfitFactor,
+    decimal Expectancy,
+    decimal AvgWin,
+    decimal AvgLoss
+);
+
+public record PerformanceDto(
+    PerformanceRangeDto Today,
+    PerformanceRangeDto Last7d,
+    PerformanceRangeDto Last30d
 );

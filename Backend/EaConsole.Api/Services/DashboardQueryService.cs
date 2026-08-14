@@ -16,7 +16,8 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
     public async Task<List<AccountListItemDto>> GetAccountsAsync(CancellationToken ct = default)
     {
         return await db.Accounts
-            .OrderBy(a => a.AccountId)
+            .OrderBy(a => a.IsDemo)
+            .ThenBy(a => a.AccountId)
             .Select(a => new AccountListItemDto(a.AccountId, a.Mt5Login, a.BrokerName, a.ServerName, a.IsDemo))
             .ToListAsync(ct);
     }
@@ -45,6 +46,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
         var closedTrades = await BuildClosedTradesAsync(accountId, historyStart, ct);
         var eaStatuses = await BuildEaStatusesAsync(accountId, brokerTodayStart, brokerTodayEnd, ct);
         var risk = await BuildRiskSnapshotAsync(accountId, latestSnapshot, brokerTodayStart, brokerTodayEnd, historyStart, ct);
+        var performance = await BuildPerformanceAsync(accountId, brokerTodayStart, brokerTodayEnd, historyStart, ct);
         var activityLog = await BuildActivityLogAsync(accountId, ct);
 
         var offsetLabel = FormatGmtOffset(account.BrokerGmtOffsetMinutes);
@@ -67,6 +69,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             ClosedTrades: closedTrades,
             EaStatuses: eaStatuses,
             Risk: risk,
+            Performance: performance,
             ActivityLog: activityLog
         );
     }
@@ -259,6 +262,16 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
                   WHERE account_id = {accountId}
                     AND captured_at_broker >= {dayStart} AND captured_at_broker < {dayEnd}
                 ) dd) AS MaxDrawdownTodayPct,
+              (SELECT IFNULL(MIN(dd_pct), 0) FROM (
+                  SELECT
+                    ROUND(
+                      (equity - MAX(equity) OVER (ORDER BY captured_at_broker))
+                      / MAX(equity) OVER (ORDER BY captured_at_broker) * 100
+                    , 2) AS dd_pct
+                  FROM account_snapshots
+                  WHERE account_id = {accountId}
+                    AND captured_at_broker >= {historyStart}
+                ) dd30) AS MaxDrawdown30dPct,
               (SELECT IFNULL(SUM(sl_amount), 0) FROM trades
                  WHERE account_id = {accountId} AND status = 'OPEN') AS OpenSlTotal,
               (SELECT IFNULL(SUM(tp_amount), 0) FROM trades
@@ -280,6 +293,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 
         return new RiskSnapshotDto(
             MaxDrawdownTodayPct: risk.MaxDrawdownTodayPct,
+            MaxDrawdown30dPct: risk.MaxDrawdown30dPct,
             OpenSlTotal: risk.OpenSlTotal,
             OpenTpTotal: risk.OpenTpTotal,
             AvgRiskReward: avgRiskReward,
@@ -289,10 +303,68 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 
     private record RiskRow(
         decimal MaxDrawdownTodayPct,
+        decimal MaxDrawdown30dPct,
         decimal OpenSlTotal,
         decimal OpenTpTotal,
         decimal AvgRiskRewardRatio,
         int RrTradeCount);
+
+    private async Task<PerformanceDto> BuildPerformanceAsync(
+        int accountId, DateTime dayStart, DateTime dayEnd, DateTime historyStart, CancellationToken ct)
+    {
+        var since7d = dayEnd.AddDays(-7);
+
+        // ไม่ใช้ daily_performance/v_ea_performance_summary เพราะตัวแรกเติม
+        // ผ่าน MySQL EVENT ที่ event_scheduler ปิดอยู่บน shared host นี้ (ดู
+        // schema.sql) และตัวหลังเป็น all-time ไม่แยกช่วงเวลา — คำนวณจาก
+        // trades ตรงๆ ต่อช่วง (วันนี้/7 วัน/30 วัน) เป็น 1 round trip ด้วย
+        // UNION ALL แทนที่จะยิง query แยกทีละช่วง
+        var rows = await db.Database.SqlQuery<PerformanceRangeRow>($@"
+            SELECT 'today' AS RangeKey, COUNT(*) AS TradesCount,
+              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2) AS WinRatePct,
+              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2) AS ProfitFactor,
+              ROUND(IFNULL(AVG(pnl), 0), 2) AS Expectancy,
+              ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2) AS AvgWin,
+              ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2) AS AvgLoss
+            FROM trades
+            WHERE account_id = {accountId} AND status = 'CLOSED'
+              AND close_time_broker >= {dayStart} AND close_time_broker < {dayEnd}
+            UNION ALL
+            SELECT '7d', COUNT(*),
+              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2),
+              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2),
+              ROUND(IFNULL(AVG(pnl), 0), 2),
+              ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2),
+              ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2)
+            FROM trades
+            WHERE account_id = {accountId} AND status = 'CLOSED'
+              AND close_time_broker >= {since7d} AND close_time_broker < {dayEnd}
+            UNION ALL
+            SELECT '30d', COUNT(*),
+              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2),
+              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2),
+              ROUND(IFNULL(AVG(pnl), 0), 2),
+              ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2),
+              ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2)
+            FROM trades
+            WHERE account_id = {accountId} AND status = 'CLOSED'
+              AND close_time_broker >= {historyStart} AND close_time_broker < {dayEnd}")
+            .ToListAsync(ct);
+
+        PerformanceRangeDto ToDto(string key)
+        {
+            var r = rows.FirstOrDefault(x => x.RangeKey == key);
+            return r is null
+                ? new PerformanceRangeDto(0, 0, 0, 0, 0, 0)
+                : new PerformanceRangeDto(r.TradesCount, r.WinRatePct, r.ProfitFactor, r.Expectancy, r.AvgWin, r.AvgLoss);
+        }
+
+        return new PerformanceDto(ToDto("today"), ToDto("7d"), ToDto("30d"));
+    }
+
+    private record PerformanceRangeRow(
+        string RangeKey, int TradesCount, decimal WinRatePct, decimal ProfitFactor,
+        decimal Expectancy, decimal AvgWin, decimal AvgLoss);
 
     private async Task<List<ActivityLogEntryDto>> BuildActivityLogAsync(int accountId, CancellationToken ct)
     {

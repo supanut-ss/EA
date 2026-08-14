@@ -15,6 +15,12 @@ export function formatPrice(value: number): string {
   });
 }
 
+export function formatDateTime(isoTimestamp: string): string {
+  const d = new Date(isoTimestamp);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export function formatRelativeTimeThai(isoTimestamp: string): string {
   const seconds = Math.max(0, Math.round((Date.now() - new Date(isoTimestamp).getTime()) / 1000));
   if (seconds < 60) return `${seconds} วินาทีที่แล้ว`;

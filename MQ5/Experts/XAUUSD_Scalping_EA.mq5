@@ -474,6 +474,9 @@ void TryTrendEntry(int bias)
       double sl = ask - atr * InpAtrSlMultTrend;
       double dist = ask - sl;
       double tp = ask + dist * InpRiskReward;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Trend pullback BUY signal: RSI recovered to %s (dipped to %s), fresh EMA cross up",
+         DoubleToString(rsi[1], 1), DoubleToString(minRsi, 1)));
       if(OpenTrade(ORDER_TYPE_BUY, sl, tp, "Scalp Buy Trend")) tradesTodayTrend++;
    }
    else if(bias == -1 && freshCrossDown && rsi[1] <= InpRsiPullbackHigh && maxRsi >= InpRsiPullbackDeepHigh)
@@ -481,6 +484,9 @@ void TryTrendEntry(int bias)
       double sl = bid + atr * InpAtrSlMultTrend;
       double dist = sl - bid;
       double tp = bid - dist * InpRiskReward;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Trend pullback SELL signal: RSI recovered to %s (rose to %s), fresh EMA cross down",
+         DoubleToString(rsi[1], 1), DoubleToString(maxRsi, 1)));
       if(OpenTrade(ORDER_TYPE_SELL, sl, tp, "Scalp Sell Trend")) tradesTodayTrend++;
    }
 }
@@ -530,6 +536,9 @@ void TryRangeEntry()
       double sl = ask - atr * InpAtrSlMultRange;
       double rrTp = ask + (ask - sl) * InpRiskReward;
       double tp = (bbMiddle[1] > ask) ? MathMin(rrTp, bbMiddle[1]) : rrTp;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Range mean-reversion BUY signal: setup closed below BB lower %s (RSI %s), confirmed back inside",
+         DoubleToString(bbLower[2], 2), DoubleToString(rsi[2], 1)));
       if(OpenTrade(ORDER_TYPE_BUY, sl, tp, "Scalp Buy Range")) tradesTodayChoppy++;
    }
    else if(sellSetup && sellConfirm)
@@ -537,6 +546,9 @@ void TryRangeEntry()
       double sl = bid + atr * InpAtrSlMultRange;
       double rrTp = bid - (sl - bid) * InpRiskReward;
       double tp = (bbMiddle[1] < bid) ? MathMax(rrTp, bbMiddle[1]) : rrTp;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Range mean-reversion SELL signal: setup closed above BB upper %s (RSI %s), confirmed back inside",
+         DoubleToString(bbUpper[2], 2), DoubleToString(rsi[2], 1)));
       if(OpenTrade(ORDER_TYPE_SELL, sl, tp, "Scalp Sell Range")) tradesTodayChoppy++;
    }
 }

@@ -373,6 +373,9 @@ void CheckForEntry()
       double sl = ask - atr * InpAtrSlMult;
       double slDist = ask - sl;
       double tp = ask + slDist * InpRiskReward;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Breakout BUY signal: close %s > Donchian high %s (+buffer %s), H1 trend bullish",
+         DoubleToString(closeLast, 2), DoubleToString(channelHigh, 2), DoubleToString(buffer, 2)));
       OpenTrade(ORDER_TYPE_BUY, sl, tp);
    }
    else if(trend == -1 && closeLast < channelLow - buffer && closePrev >= channelLow - buffer)
@@ -380,6 +383,9 @@ void CheckForEntry()
       double sl = bid + atr * InpAtrSlMult;
       double slDist = sl - bid;
       double tp = bid - slDist * InpRiskReward;
+      IngestLog(InpIngestEaId, "info", StringFormat(
+         "Breakout SELL signal: close %s < Donchian low %s (-buffer %s), H1 trend bearish",
+         DoubleToString(closeLast, 2), DoubleToString(channelLow, 2), DoubleToString(buffer, 2)));
       OpenTrade(ORDER_TYPE_SELL, sl, tp);
    }
 }

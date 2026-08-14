@@ -89,10 +89,26 @@ export interface ActivityLogEntry {
 
 export interface RiskSnapshot {
   maxDrawdownTodayPct: number;
+  maxDrawdown30dPct: number;
   openSlTotal: number;
   openTpTotal: number;
   avgRiskReward: string;
   currentSpreadPts: number;
+}
+
+export interface PerformanceRange {
+  tradesCount: number;
+  winRatePct: number;
+  profitFactor: number;
+  expectancy: number;
+  avgWin: number;
+  avgLoss: number;
+}
+
+export interface Performance {
+  today: PerformanceRange;
+  last7d: PerformanceRange;
+  last30d: PerformanceRange;
 }
 
 export interface DashboardSnapshot {
@@ -106,6 +122,7 @@ export interface DashboardSnapshot {
   closedTrades: ClosedTrade[];
   eaStatuses: EaStatus[];
   risk: RiskSnapshot;
+  performance: Performance;
   activityLog: ActivityLogEntry[];
 }
 
