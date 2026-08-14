@@ -26,9 +26,11 @@ public record SignalPendingRequest(
 
 // POST /api/signals/local - EA3 reporting its OWN internally-generated trade
 // (opened by its own structure logic, not a webhook signal). Sent once on open
-// (status="OPEN") and once on close (status="WIN"|"LOSS" based on profit sign -
-// EA3 does not tell us TP/SL/manual, so CloseReason is left null rather than
-// guessed).
+// (status="OPEN") and once on close (status="WIN"|"LOSS" based on profit sign).
+// close_reason (added 2026-08-14): MT5's own DEAL_REASON when it's
+// authoritative (TP/SL/Manual), else EA3's own tracked exit rule
+// ("Structure Break", "Bearish CHoCH", "Time Stop", "Force Close
+// (Session End)", ...) - free text, not a fixed set, see Trade.CloseReason.
 public record SignalLocalTradeRequest(
     [property: JsonPropertyName("token")] string? Token,
     [property: JsonPropertyName("id")] string Id,
@@ -41,7 +43,8 @@ public record SignalLocalTradeRequest(
     [property: JsonPropertyName("status")] string Status, // "OPEN" | "WIN" | "LOSS"
     [property: JsonPropertyName("ticket")] string Ticket,
     [property: JsonPropertyName("exit_price")] decimal ExitPrice,
-    [property: JsonPropertyName("profit")] decimal Profit
+    [property: JsonPropertyName("profit")] decimal Profit,
+    [property: JsonPropertyName("close_reason")] string? CloseReason = null
 );
 
 // POST /api/signals/update - lifecycle status for a WEBHOOK-sourced signal

@@ -20,16 +20,6 @@ public enum TradeStatus
     Closed,
 }
 
-public enum TradeCloseReason
-{
-    TakeProfit,
-    StopLoss,
-    TrailingStop,
-    Manual,
-    EaLogic,
-    Other,
-}
-
 public enum ConnectionState
 {
     Connected,
@@ -85,39 +75,21 @@ public static class EnumDbMaps
         _ => throw new ArgumentOutOfRangeException(nameof(v)),
     };
 
-    public static string ToDb(this TradeCloseReason v) => v switch
+    // close_reason เป็น free text ใน DB แล้ว (ไม่ใช่ enum) เพราะ EA3 ส่ง
+    // ข้อความอธิบายเอง ("Structure Break", "Bearish CHoCH", ...) ที่ไม่เข้า
+    // ชุดค่าคงที่แบบ EA1/EA2 (TP/SL/TRAILING_STOP/MANUAL/EA_LOGIC/OTHER) -
+    // ฟังก์ชันนี้แค่แปลง short code ที่รู้จักให้อ่านง่ายขึ้น ส่วนข้อความอื่น
+    // (ของ EA3) อ่านง่ายอยู่แล้วเลยส่งผ่านตรงๆ
+    public static string? PrettifyCloseReason(string? v) => v switch
     {
-        TradeCloseReason.TakeProfit => "TP",
-        TradeCloseReason.StopLoss => "SL",
-        TradeCloseReason.TrailingStop => "TRAILING_STOP",
-        TradeCloseReason.Manual => "MANUAL",
-        TradeCloseReason.EaLogic => "EA_LOGIC",
-        TradeCloseReason.Other => "OTHER",
-        _ => throw new ArgumentOutOfRangeException(nameof(v)),
-    };
-
-    public static TradeCloseReason TradeCloseReasonFromDb(string v) => v switch
-    {
-        "TP" => TradeCloseReason.TakeProfit,
-        "SL" => TradeCloseReason.StopLoss,
-        "TRAILING_STOP" => TradeCloseReason.TrailingStop,
-        "MANUAL" => TradeCloseReason.Manual,
-        "EA_LOGIC" => TradeCloseReason.EaLogic,
-        "OTHER" => TradeCloseReason.Other,
-        _ => throw new ArgumentOutOfRangeException(nameof(v)),
-    };
-
-    // ข้อความอ่านง่ายสำหรับโชว์บน Trade History card (Frontend คาดหวัง
-    // free-text เช่น "Trailing stop", "Stop loss", "Take profit")
-    public static string ToDisplayText(this TradeCloseReason v) => v switch
-    {
-        TradeCloseReason.TakeProfit => "Take profit",
-        TradeCloseReason.StopLoss => "Stop loss",
-        TradeCloseReason.TrailingStop => "Trailing stop",
-        TradeCloseReason.Manual => "Manual close",
-        TradeCloseReason.EaLogic => "EA logic",
-        TradeCloseReason.Other => "Other",
-        _ => v.ToString(),
+        null => null,
+        "TP" => "Take profit",
+        "SL" => "Stop loss",
+        "TRAILING_STOP" => "Trailing stop",
+        "MANUAL" => "Manual close",
+        "EA_LOGIC" => "EA logic",
+        "OTHER" => "Other",
+        _ => v,
     };
 
     public static string ToDb(this ConnectionState v) =>

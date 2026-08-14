@@ -98,7 +98,12 @@ CREATE TABLE trades (
   pnl                 DECIMAL(14,2) NULL,     -- realized P/L สุดท้าย (NULL จนกว่าจะปิด)
   swap                DECIMAL(14,2) NOT NULL DEFAULT 0,
   commission          DECIMAL(14,2) NOT NULL DEFAULT 0,
-  close_reason        ENUM('TP','SL','TRAILING_STOP','MANUAL','EA_LOGIC','OTHER') NULL,
+  -- Free text, not ENUM (2026-08-14+): EA1/EA2 still send short codes
+  -- (TP/SL/TRAILING_STOP/MANUAL/EA_LOGIC/OTHER, prettified for display -
+  -- see EnumDbMaps.PrettifyCloseReason), but EA3 sends its own descriptive
+  -- exit reasons ("Structure Break", "Bearish CHoCH", "Time Stop", ...)
+  -- that don't fit a small fixed set.
+  close_reason        VARCHAR(50) NULL,
 
   created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP

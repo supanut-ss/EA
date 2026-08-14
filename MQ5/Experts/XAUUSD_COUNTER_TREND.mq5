@@ -543,7 +543,7 @@ int fvg_bull_age = -1, fvg_bear_age = -1;
 int ob_bull_age = -1, ob_bear_age = -1;
 
 //--- Tracked positions
-struct TrackedPosition { ulong ticket; ulong identifier; string symbol; string action; double volume; double open_price; double sl; double tp; string comment; };
+struct TrackedPosition { ulong ticket; ulong identifier; string symbol; string action; double volume; double open_price; double sl; double tp; string comment; string pending_close_reason; };
 TrackedPosition tracked_positions[];
 int tracked_count = 0;
 
@@ -648,6 +648,7 @@ void ForceCloseAllPositions()
       if(PositionGetString(POSITION_SYMBOL) != Symbol()) continue;
       
       Print("ATS EA: Force Closing position #", ticket, " due to Force Close Time.");
+      SetPendingCloseReason(ticket, "Force Close (Session End)");
       ResetLastError();
       bool close_request_ok = trade.PositionClose(ticket);
       if(IsTradeResultSuccessful(close_request_ok, "Force close", ticket))
@@ -673,6 +674,7 @@ void AddTrackedPosition(ulong t, ulong identifier, string sym, string act, doubl
    tracked_positions[tracked_count].sl = sl;
    tracked_positions[tracked_count].tp = tp;
    tracked_positions[tracked_count].comment = comment;
+   tracked_positions[tracked_count].pending_close_reason = "";
    tracked_count++;
 }
 
@@ -684,12 +686,30 @@ void RemoveTrackedPosition(int idx)
    ArrayResize(tracked_positions, tracked_count);
 }
 
+// Called right before an EA-initiated trade.PositionClose() so the
+// close-detection loop in SyncPositionsWithBackend can report WHY it
+// closed - MT5's own DEAL_REASON only ever says "EXPERT" for these
+// (i.e. "some EA closed it"), it can't know the EA's actual motive.
+void SetPendingCloseReason(ulong ticket, string reason)
+{
+   for(int i = 0; i < tracked_count; i++)
+   {
+      if(tracked_positions[i].ticket == ticket)
+      {
+         tracked_positions[i].pending_close_reason = reason;
+         return;
+      }
+   }
+}
+
 bool GetClosedPositionResult(const ulong position_identifier,
                              double &exit_price,
-                             double &net_profit)
+                             double &net_profit,
+                             ENUM_DEAL_REASON &exit_deal_reason)
 {
    exit_price = 0.0;
    net_profit = 0.0;
+   exit_deal_reason = DEAL_REASON_CLIENT; // harmless default, only read when has_exit is true
    if(position_identifier == 0 || !HistorySelectByPosition(position_identifier))
       return false;
 
@@ -716,6 +736,7 @@ bool GetClosedPositionResult(const ulong position_identifier,
          {
             latest_exit_time_msc = exit_time_msc;
             exit_price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
+            exit_deal_reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(deal_ticket, DEAL_REASON);
          }
       }
    }
@@ -727,7 +748,7 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
                              ulong ticket, double exit_price, double profit,
                              double mfe = 0.0, double mae = 0.0, double adx = 0.0,
                              double chop = 0.0, double atr_ratio = 0.0, bool is_low_vol = false,
-                             string entry_condition = "")
+                             string entry_condition = "", string close_reason = "")
 {
    if(!IsExternalIntegrationAllowed()) return;
    string url  = backend_url + "/api/signals/local";
@@ -736,7 +757,7 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
                               "\"volume\":%s,\"entry_price\":%s,\"sl\":%s,\"tp\":%s,"
                               "\"status\":\"%s\",\"ticket\":\"%s\",\"exit_price\":%s,\"profit\":%s,"
                               "\"mfe\":%s,\"mae\":%s,\"adx\":%s,\"chop\":%s,\"atr_ratio\":%s,\"is_low_vol\":%s,"
-                              "\"entry_condition\":\"%s\"}",
+                              "\"entry_condition\":\"%s\",\"close_reason\":\"%s\"}",
                               auth_token, id, action, symbol,
                               DoubleToString(volume,2), DoubleToString(entry_price,2),
                               DoubleToString(sl,2), DoubleToString(tp,2),
@@ -744,7 +765,7 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
                               DoubleToString(exit_price,2), DoubleToString(profit,2),
                               DoubleToString(mfe,5), DoubleToString(mae,5), DoubleToString(adx,2),
                               DoubleToString(chop,2), DoubleToString(atr_ratio,3), is_low_vol ? "true" : "false",
-                              entry_condition);
+                              entry_condition, AtsJsonEscape(close_reason));
    char pd[], rd[]; string rh;
    StringToCharArray(pay, pd, 0, StringLen(pay), CP_UTF8);
    ResetLastError();
@@ -841,8 +862,9 @@ void SyncPositionsWithBackend()
       if(!found)
       {
          double ep = 0.0, pf = 0.0;
+         ENUM_DEAL_REASON deal_reason = DEAL_REASON_CLIENT;
          ulong identifier = tracked_positions[j].identifier;
-         bool exit_history_found = GetClosedPositionResult(identifier, ep, pf);
+         bool exit_history_found = GetClosedPositionResult(identifier, ep, pf, deal_reason);
          if(!exit_history_found)
          {
             // The terminal history can lag the position list briefly. Retain
@@ -852,6 +874,18 @@ void SyncPositionsWithBackend()
          }
          string stat = (pf >= 0.0 ? "WIN" : "LOSS");
          string tk_str = IntegerToString(tk);
+
+         // MT5's own DEAL_REASON is authoritative for TP/SL/Manual (the
+         // broker/terminal decided those, not us) - only fall back to our
+         // own tracked reason (Structure Break / CHoCH / Time Stop / Force
+         // Close) when MT5 just says "an EA closed it", since that alone
+         // doesn't say which of our own exit rules actually fired.
+         string close_reason;
+         if(deal_reason == DEAL_REASON_TP) close_reason = "TP";
+         else if(deal_reason == DEAL_REASON_SL) close_reason = "SL";
+         else if(deal_reason == DEAL_REASON_CLIENT || deal_reason == DEAL_REASON_MOBILE || deal_reason == DEAL_REASON_WEB) close_reason = "Manual";
+         else if(tracked_positions[j].pending_close_reason != "") close_reason = tracked_positions[j].pending_close_reason;
+         else close_reason = "EA Logic";
          double mfe = 0.0, mae = 0.0, adx = 0.0, chop = 0.0, atr_ratio = 0.0;
          bool low_vol = false;
 
@@ -890,7 +924,8 @@ void SyncPositionsWithBackend()
                                  tracked_positions[j].symbol, tracked_positions[j].volume,
                                  tracked_positions[j].open_price, tracked_positions[j].sl,
                                  tracked_positions[j].tp, stat, tk, ep, pf,
-                                 mfe, mae, adx, chop, atr_ratio, low_vol, tracked_positions[j].comment);
+                                 mfe, mae, adx, chop, atr_ratio, low_vol, tracked_positions[j].comment,
+                                 close_reason);
 
          if(GlobalVariableCheck(max_price_key)) GlobalVariableDel(max_price_key);
          if(GlobalVariableCheck(min_price_key)) GlobalVariableDel(min_price_key);
@@ -1731,6 +1766,7 @@ bool ManageEarlyExit(double closed_price,
       Print("ATS EA: EARLY EXIT #", ticket, " ", is_buy ? "BUY" : "SELL",
             " reason=", reason, " confirm=", confirmed_bars,
             " adverseR=", DoubleToString(adverse_r, 2), " heldBars=", held_bars);
+      SetPendingCloseReason(ticket, reason);
 
       ResetLastError();
       bool close_request_ok = trade.PositionClose(ticket);
@@ -3051,7 +3087,8 @@ void ExecuteClose(string id,string sym,ulong ticket)
       if(IsTradeResultSuccessful(close_request_ok, "Webhook CLOSE", ticket))
       {
          double pf=0.0, history_exit_price=0.0;
-         bool exit_history_found = GetClosedPositionResult(position_identifier, history_exit_price, pf);
+         ENUM_DEAL_REASON unused_deal_reason = DEAL_REASON_CLIENT;
+         bool exit_history_found = GetClosedPositionResult(position_identifier, history_exit_price, pf, unused_deal_reason);
          string close_status = !exit_history_found ? "CLOSED_UNRESOLVED" : (pf>=0?"WIN":"LOSS");
          double reported_exit_price = history_exit_price > 0.0 ? history_exit_price : trade.ResultPrice();
          UpdateSignalStatus(id,close_status,ticket,0.0,reported_exit_price,pf);

@@ -161,7 +161,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             ClosePrice: t.ClosePrice,
             Pnl: t.Pnl,
             ClosedAtBroker: t.CloseTimeBroker!.Value.ToString("HH:mm"),
-            CloseReason: t.CloseReason?.ToDisplayText()
+            CloseReason: EnumDbMaps.PrettifyCloseReason(t.CloseReason)
         )).ToList();
     }
 

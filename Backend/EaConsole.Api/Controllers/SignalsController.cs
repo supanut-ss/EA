@@ -97,14 +97,15 @@ public class SignalsController(EaConsoleDbContext db) : ControllerBase
         }
         else
         {
-            // "WIN" | "LOSS" - EA3 does not report which exit rule fired
-            // (TP/SL/early-exit/time-stop), so CloseReason stays unset rather
-            // than guessing.
+            // "WIN" | "LOSS" - close_reason (2026-08-14+) carries the actual
+            // exit rule (TP/SL/Manual from MT5's own DEAL_REASON, or EA3's
+            // own tracked reason for EA-initiated closes).
             trade.Status = TradeStatus.Closed;
             trade.ClosePrice = request.ExitPrice;
             trade.Pnl = request.Profit;
             trade.CurrentPrice = null;
             trade.CloseTimeBroker = now;
+            trade.CloseReason = request.CloseReason;
         }
 
         await db.SaveChangesAsync(ct);

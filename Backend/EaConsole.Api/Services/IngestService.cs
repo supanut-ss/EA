@@ -66,9 +66,7 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
         trade.Pnl = request.Pnl;
         trade.Swap = request.Swap;
         trade.Commission = request.Commission;
-        trade.CloseReason = request.CloseReason is null
-            ? null
-            : EnumDbMaps.TradeCloseReasonFromDb(request.CloseReason);
+        trade.CloseReason = request.CloseReason;
         trade.UpdatedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
