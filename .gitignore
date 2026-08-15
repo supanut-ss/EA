@@ -44,6 +44,10 @@ Backend/EaConsole.Api/wwwroot/
 # holds real FTP/DB/API secrets filled in by hand, never commit it ----------
 deployment/*.local.ps1
 
+# ---------- Simple single-host deploy script (eTPL-style) - has real FTP/DB/
+# API secrets hardcoded inline by design, never commit it ----------
+/deploy-single-host.ps1
+
 # ---------- SQL local data / dumps ----------
 *.mdf
 *.ldf

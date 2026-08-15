@@ -10,7 +10,8 @@
 #>
 
 function Deploy-Frontend {
-    param($Ctx, [string]$OutputRoot, [string[]]$UploadPaths, [string[]]$DeletePaths, [string]$FrontendUrl)
+    param($Ctx, [string]$OutputRoot, [string[]]$UploadPaths, [string[]]$DeletePaths, [string]$FrontendUrl,
+        [int]$HealthCheckTimeoutSeconds = 60, [int]$HealthCheckRetrySeconds = 2)
 
     if ($UploadPaths.Count -eq 0 -and $DeletePaths.Count -eq 0) {
         Write-DeployLog "Frontend: nothing to do." "OK"
@@ -43,7 +44,7 @@ function Deploy-Frontend {
     }
 
     if ($FrontendUrl -and $indexFiles.Count -gt 0) {
-        $healthy = Test-FrontendHealth -Url $FrontendUrl -ExpectedAssetMarker $assetMarker -TimeoutSeconds 60 -RetryIntervalSeconds 2
+        $healthy = Test-FrontendHealth -Url $FrontendUrl -ExpectedAssetMarker $assetMarker -TimeoutSeconds $HealthCheckTimeoutSeconds -RetryIntervalSeconds $HealthCheckRetrySeconds
         if (-not $healthy) { throw "HEALTH_CHECK_FAILED: frontend did not come up healthy after deploying $($indexFiles -join ', ')." }
     }
 

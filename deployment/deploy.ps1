@@ -195,7 +195,8 @@ try {
         # ---------------------------------------------------------
         if ($frontendHasWork) {
             Deploy-Frontend -Ctx $ctx -OutputRoot $releaseOutputRoot `
-                -UploadPaths $areas.FrontendUpload -DeletePaths $areas.FrontendDelete -FrontendUrl $config.frontendUrl
+                -UploadPaths $areas.FrontendUpload -DeletePaths $areas.FrontendDelete -FrontendUrl $config.frontendUrl `
+                -HealthCheckTimeoutSeconds $config.healthCheckTimeoutSeconds -HealthCheckRetrySeconds $config.healthCheckRetrySeconds
             Update-DeployLockHeartbeat -Ctx $ctx -LockState $lockState
         }
         if ($backendHasWork) {
@@ -203,7 +204,9 @@ try {
                 -BackendUpload $areas.BackendUpload -BackendDelete $areas.BackendDelete `
                 -RuntimeSensitiveUpload $plan.RuntimeSensitiveUpload -RuntimeSensitivePatterns $config.runtimeSensitivePatterns `
                 -ReleaseId $releaseId -TemplatePath "$PSScriptRoot\templates\app_offline.htm" -HealthUrl $config.healthUrl `
-                -DllUnlockTimeoutSeconds $config.dllUnlockTimeoutSeconds -LockState $lockState -Journal $journal
+                -DllUnlockTimeoutSeconds $config.dllUnlockTimeoutSeconds `
+                -HealthCheckTimeoutSeconds $config.healthCheckTimeoutSeconds -HealthCheckRetrySeconds $config.healthCheckRetrySeconds `
+                -LockState $lockState -Journal $journal
         }
 
         # ---------------------------------------------------------

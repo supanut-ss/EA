@@ -321,8 +321,8 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
         // UNION ALL แทนที่จะยิง query แยกทีละช่วง
         var rows = await db.Database.SqlQuery<PerformanceRangeRow>($@"
             SELECT 'today' AS RangeKey, COUNT(*) AS TradesCount,
-              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2) AS WinRatePct,
-              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2) AS ProfitFactor,
+              IFNULL(ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2), 0) AS WinRatePct,
+              IFNULL(ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2), 0) AS ProfitFactor,
               ROUND(IFNULL(AVG(pnl), 0), 2) AS Expectancy,
               ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2) AS AvgWin,
               ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2) AS AvgLoss
@@ -331,8 +331,8 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
               AND close_time_broker >= {dayStart} AND close_time_broker < {dayEnd}
             UNION ALL
             SELECT '7d', COUNT(*),
-              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2),
-              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2),
+              IFNULL(ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2), 0),
+              IFNULL(ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2), 0),
               ROUND(IFNULL(AVG(pnl), 0), 2),
               ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2),
               ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2)
@@ -341,8 +341,8 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
               AND close_time_broker >= {since7d} AND close_time_broker < {dayEnd}
             UNION ALL
             SELECT '30d', COUNT(*),
-              ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2),
-              ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2),
+              IFNULL(ROUND(IFNULL(SUM(pnl > 0), 0) / NULLIF(COUNT(*), 0) * 100, 2), 0),
+              IFNULL(ROUND(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) / NULLIF(ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)), 0), 2), 0),
               ROUND(IFNULL(AVG(pnl), 0), 2),
               ROUND(IFNULL(AVG(CASE WHEN pnl > 0 THEN pnl END), 0), 2),
               ROUND(IFNULL(AVG(CASE WHEN pnl < 0 THEN pnl END), 0), 2)

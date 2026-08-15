@@ -72,6 +72,8 @@ function Deploy-BackendSafely {
         [string]$TemplatePath,
         [string]$HealthUrl,
         [int]$DllUnlockTimeoutSeconds,
+        [int]$HealthCheckTimeoutSeconds = 60,
+        [int]$HealthCheckRetrySeconds = 2,
         $LockState,
         $Journal
     )
@@ -110,7 +112,7 @@ function Deploy-BackendSafely {
         $Journal.MaintenanceEnabled = $false
 
         Write-DeployLog "Backend health check (expecting release '$ReleaseId')..."
-        $healthy = Test-BackendHealth -Url $HealthUrl -ExpectedRelease $ReleaseId -TimeoutSeconds 60 -RetryIntervalSeconds 2
+        $healthy = Test-BackendHealth -Url $HealthUrl -ExpectedRelease $ReleaseId -TimeoutSeconds $HealthCheckTimeoutSeconds -RetryIntervalSeconds $HealthCheckRetrySeconds
         if (-not $healthy) {
             throw "HEALTH_CHECK_FAILED: backend did not report healthy at release '$ReleaseId' after coming back online."
         }
