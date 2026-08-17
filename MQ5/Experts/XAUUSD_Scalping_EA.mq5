@@ -440,8 +440,8 @@ bool OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp, string comment)
 //+------------------------------------------------------------------+
 void TryTrendEntry(int bias)
 {
-   if(bias == 0) return;
-   if(tradesTodayTrend >= InpMaxTradesPerDayTrend) return;
+   if(bias == 0) { Print("Entry skip: TREND regime but bias unclear (EMA/DI disagree)"); return; }
+   if(tradesTodayTrend >= InpMaxTradesPerDayTrend) { Print("Entry skip: TREND daily cap reached (", InpMaxTradesPerDayTrend, ")"); return; }
 
    int lookback = InpPullbackLookbackBars + 2;
    double rsi[], emaFastM5buf[], closeBuf[];
@@ -489,6 +489,11 @@ void TryTrendEntry(int bias)
          DoubleToString(rsi[1], 1), DoubleToString(maxRsi, 1)));
       if(OpenTrade(ORDER_TYPE_SELL, sl, tp, "Scalp Sell Trend")) tradesTodayTrend++;
    }
+   else
+   {
+      Print("Entry skip: TREND bias=", bias, " no pullback setup (RSI=", DoubleToString(rsi[1], 1),
+            " crossUp=", freshCrossUp, " crossDown=", freshCrossDown, ")");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -505,7 +510,7 @@ void TryTrendEntry(int bias)
 //+------------------------------------------------------------------+
 void TryRangeEntry()
 {
-   if(tradesTodayChoppy >= InpMaxTradesPerDayChoppy) return;
+   if(tradesTodayChoppy >= InpMaxTradesPerDayChoppy) { Print("Entry skip: RANGE daily cap reached (", InpMaxTradesPerDayChoppy, ")"); return; }
 
    double rsi[], bbUpper[], bbLower[], bbMiddle[];
    ArraySetAsSeries(rsi, true);
@@ -550,6 +555,11 @@ void TryRangeEntry()
          "Range mean-reversion SELL signal: setup closed above BB upper %s (RSI %s), confirmed back inside",
          DoubleToString(bbUpper[2], 2), DoubleToString(rsi[2], 1)));
       if(OpenTrade(ORDER_TYPE_SELL, sl, tp, "Scalp Sell Range")) tradesTodayChoppy++;
+   }
+   else
+   {
+      Print("Entry skip: RANGE no setup (RSI=", DoubleToString(rsi[2], 1),
+            " buySetup=", buySetup, " sellSetup=", sellSetup, ")");
    }
 }
 
@@ -691,18 +701,18 @@ void ManagePositionStops()
 //+------------------------------------------------------------------+
 void CheckForEntry()
 {
-   if(g_blockNewEntries) return;
-   if(CountOpenPositions() >= InpMaxOpenPositions) return;
-   if(!IsSpreadOk()) return;
+   if(g_blockNewEntries) { Print("Entry skip: flatten buffer (near session close/break)"); return; }
+   if(CountOpenPositions() >= InpMaxOpenPositions) { Print("Entry skip: max open positions (", InpMaxOpenPositions, ")"); return; }
+   if(!IsSpreadOk()) { Print("Entry skip: spread ", (int)SymbolInfoInteger(symbolName, SYMBOL_SPREAD), " > max ", (int)InpMaxSpreadPoints, " pts"); return; }
 
    if(InpAvoidSunday)
    {
       MqlDateTime now;
       TimeToStruct(TimeCurrent(), now);
-      if(now.day_of_week == 0) return;
+      if(now.day_of_week == 0) { Print("Entry skip: Sunday"); return; }
    }
 
-   if(IsLossGuardBlocking()) return;
+   if(IsLossGuardBlocking()) { Print("Entry skip: loss guard active"); return; }
 
    int bias;
    int regime = GetRegime(bias);

@@ -2295,9 +2295,20 @@ void CheckBEAndTrailing()
           {
              if(!PrepareModifiedStop(Symbol(), typ, cur, nsl))
                 continue;
+             // A rejected modify (e.g. broker "invalid stops") leaves the position's
+             // real SL unchanged, so next tick recomputes the SAME target and retries
+             // - without this guard that repeats every tick forever (seen in backtest:
+             // hundreds of identical "invalid stops" retries within one bar). Skip a
+             // target once it has already failed, until price moves it to something new.
+             string failed_sl_key = GetAnalyticsKey("LAST_FAILED_SL", analytics_identity);
+             if(GlobalVariableCheck(failed_sl_key) && MathAbs(GlobalVariableGet(failed_sl_key) - nsl) < pt/2)
+                continue;
              ResetLastError();
              bool modify_request_ok = trade.PositionModify(tk,nsl,tp);
-             IsTradeResultSuccessful(modify_request_ok, "BUY SL modify", tk, true);
+             if(IsTradeResultSuccessful(modify_request_ok, "BUY SL modify", tk, true))
+                GlobalVariableDel(failed_sl_key);
+             else
+                GlobalVariableSet(failed_sl_key, nsl);
           }
       }
       else
@@ -2326,9 +2337,17 @@ void CheckBEAndTrailing()
           {
              if(!PrepareModifiedStop(Symbol(), typ, cur, nsl))
                 continue;
+             // See matching comment in the BUY branch above - same guard against
+             // retrying an already-rejected target every tick forever.
+             string failed_sl_key = GetAnalyticsKey("LAST_FAILED_SL", analytics_identity);
+             if(GlobalVariableCheck(failed_sl_key) && MathAbs(GlobalVariableGet(failed_sl_key) - nsl) < pt/2)
+                continue;
              ResetLastError();
              bool modify_request_ok = trade.PositionModify(tk,nsl,tp);
-             IsTradeResultSuccessful(modify_request_ok, "SELL SL modify", tk, true);
+             if(IsTradeResultSuccessful(modify_request_ok, "SELL SL modify", tk, true))
+                GlobalVariableDel(failed_sl_key);
+             else
+                GlobalVariableSet(failed_sl_key, nsl);
           }
       }
    }
