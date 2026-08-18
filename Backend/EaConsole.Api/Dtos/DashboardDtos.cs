@@ -5,10 +5,13 @@ namespace EaConsole.Api.Dtos;
 // จาก Program.cs เลยไม่ต้องแปลงชื่อเอง) ถ้าจะแก้ type ฝั่ง frontend ต้องมา
 // แก้ไฟล์นี้คู่กันเสมอ
 
-// หมายเหตุ: ตั้งใจไม่มี field "localTime" — เวลาท้องถิ่นของผู้ดูเป็นเรื่อง
+// หมายเหตุ: ตั้งใจไม่มี field "localTime" ทั่วไป — เวลาท้องถิ่นของผู้ดูเป็นเรื่อง
 // ของ browser ฝั่ง client เท่านั้น backend ไม่มีทางรู้ timezone ของคนเปิดหน้า
-// จอ จึงไม่ควรส่งค่านี้มาจากฝั่งเซิร์ฟเวอร์ (ของเดิมที่ hardcode ไว้ใน
-// mockData.ts เป็นความเข้าใจผิดที่แก้ไปแล้วทั้งฝั่ง frontend/backend)
+// จอ จึงไม่ควรเดาค่านี้ (ของเดิมที่ hardcode ไว้ใน mockData.ts เป็นความเข้าใจผิด
+// ที่แก้ไปแล้วทั้งฝั่ง frontend/backend) — ต่างจาก field "...Thai" ด้านล่างซึ่ง
+// ไม่ใช่การเดา timezone ของผู้ใช้ แต่เป็นการแปลงเวลา broker (per-account,
+// รู้ broker_gmt_offset_minutes แน่นอน) เป็นเวลาไทย (UTC+7 คงที่) ตามที่ตั้งใจ
+// ให้ผู้ใช้ทุกคนของระบบนี้เห็นเวลาเดียวกันเสมอ
 // LastSyncedAt ส่งเป็น ISO timestamp ดิบ ให้ frontend คำนวณ "กี่วินาทีที่แล้ว"
 // เองตอน render แทนที่จะ freeze ข้อความไว้ตั้งแต่ตอนตอบ response
 public record DashboardSnapshotDto(
@@ -71,9 +74,14 @@ public record PositionDto(
     decimal? StopLoss,
     decimal? TakeProfit,
     decimal? Pnl,
-    string OpenedAtBroker
+    string OpenedAtThai
 );
 
+// ClosedAtBroker กับ ClosedAtThai อยู่คู่กันโดยตั้งใจ: ClosedAtThai ไว้แสดงผล
+// ในตาราง (ที่ user ต้องการ) ส่วน ClosedAtBroker ยังต้องคงไว้ให้
+// TradeSessionAnalytics.tsx ฝั่ง frontend ใช้ bucket ชั่วโมงเข้า session
+// Asian/London/NY ซึ่งอิงกับเวลา broker ไม่ใช่เวลาไทย - แปลงเป็นไทยแล้วจะ
+// ทำให้ bucket ผิด
 public record ClosedTradeDto(
     string Id,
     string EaId,
@@ -85,6 +93,7 @@ public record ClosedTradeDto(
     decimal? ClosePrice,
     decimal? Pnl,
     string ClosedAtBroker,
+    string ClosedAtThai,
     string? CloseReason
 );
 
@@ -109,7 +118,7 @@ public record EquityPointDto(
 
 public record ActivityLogEntryDto(
     string Id,
-    string TimeBroker,
+    string TimeThai,
     string EaName,
     string Message,
     string Level

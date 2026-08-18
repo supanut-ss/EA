@@ -310,12 +310,57 @@ void IngestSetEaStatus(string state)
 }
 
 //+------------------------------------------------------------------+
+// Fallback for when IngestPopOpen() finds nothing - e.g. the EA was
+// recompiled/restarted while this position was still open, so
+// g_ingestOpenTrades[] (in-memory only, never rebuilt from live state)
+// lost the record; or the open-side ingest call simply never ran. Without
+// this fallback IngestHandleTradeTransaction() used to silently `return`
+// on a miss, which meant the close report - and the trade itself, as far
+// as the backend/dashboard ever knew - was dropped forever with no log
+// line anywhere. Real incident (2026-08-18): several XAUUSD_Scalping_EA
+// trades confirmed closed in the MT5 terminal history never appeared in
+// the dashboard's Trade History at all.
+//
+// Rebuilds enough of the open side from MT5's own deal history (which the
+// terminal always retains, unlike our in-memory array) to still report
+// the close. SL/TP/slAmount/tpAmount are NOT stored on deals in MT5, so
+// they come back as 0 ("unset") only in this fallback path - still far
+// better than dropping the closed trade entirely.
+//+------------------------------------------------------------------+
+bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo)
+{
+   if(!HistorySelectByPosition(positionId)) return false;
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket == 0) continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+
+      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+      outInfo.ticket    = positionId;
+      outInfo.side      = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+      outInfo.lot       = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+      outInfo.openPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+      outInfo.sl        = 0;
+      outInfo.tp        = 0;
+      outInfo.slAmount  = 0;
+      outInfo.tpAmount  = 0;
+      outInfo.openTime  = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 // Call from the including EA's OnTradeTransaction(). Detects the CLOSE
 // side only (opens are sent directly from OpenTrade(), which already
 // has all the fields on hand) - matches the closed deal back to the
 // IngestTrackOpen() record by position id, so this only needs one
 // history lookup (the closing deal itself), not a second scan for the
-// original opening deal.
+// original opening deal. Falls back to IngestReconstructOpenInfo() when
+// there's no in-memory record (see that function's comment).
 //+------------------------------------------------------------------+
 void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicNumber, string symbol)
 {
@@ -333,7 +378,15 @@ void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicN
    ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
 
    IngestOpenTradeInfo info;
-   if(!IngestPopOpen(positionId, info)) return; // not one of our tracked trades
+   if(!IngestPopOpen(positionId, info))
+   {
+      if(!IngestReconstructOpenInfo(positionId, info))
+      {
+         Print("Ingest: WARNING - position #", positionId, " closed but no open record found (not tracked, and not in deal history either) - close NOT reported");
+         return;
+      }
+      Print("Ingest: position #", positionId, " had no in-memory open record (EA restarted mid-trade?) - reconstructed from deal history to report the close (SL/TP will show as 0/unset)");
+   }
 
    double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
    double profit      = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);

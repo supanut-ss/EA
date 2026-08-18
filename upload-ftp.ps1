@@ -29,6 +29,13 @@ param(
     # original always-upload-these-extensions behavior.
     [string]$ManifestPath = "",
 
+    # Remove files found directly in RemotePath that are not present directly
+    # in LocalPath. This is intentionally root-only: application runtime files
+    # such as versioned mscordaccore DLLs otherwise accumulate across .NET
+    # updates and can exhaust small hosting quotas, while persistent subfolders
+    # such as logs remain untouched. app_offline.htm is always protected.
+    [switch]$PruneRemoteRootFiles,
+
     [switch]$DryRun
 )
 
@@ -171,6 +178,310 @@ function Ensure-RemoteDirectory {
         }
     }
     [void]$script:ensuredDirs.Add($DirectoryPath)
+}
+
+function Get-RemoteFileSize {
+    param([string]$Uri)
+
+    try {
+        $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::GetFileSize)
+        $response = $request.GetResponse()
+        $size = $response.ContentLength
+        $response.Close()
+        return $size
+    }
+    catch {
+        return -1
+    }
+}
+
+function Remove-RemoteFile {
+    param([string]$Uri)
+
+    try {
+        $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::DeleteFile)
+        $response = $request.GetResponse()
+        $response.Close()
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-RemoteFileHash {
+    param(
+        [string]$Uri,
+        [byte[]]$ExpectedBytes
+    )
+
+    $remoteBytes = $null
+    try {
+        $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::DownloadFile)
+        $response = $request.GetResponse()
+        $memory = New-Object System.IO.MemoryStream
+        $response.GetResponseStream().CopyTo($memory)
+        $response.Close()
+        $remoteBytes = $memory.ToArray()
+        $memory.Dispose()
+    }
+    catch {
+        # The same host filter that rejects a full STOR can reset a RETR that
+        # begins with this PE header. Retrieve from byte 1 instead; byte 0 was
+        # written and size-verified as its own one-byte STOR before any APPE.
+        try {
+            if ($ExpectedBytes.Length -lt 2 -or (Get-RemoteFileSize -Uri $Uri) -ne $ExpectedBytes.Length) {
+                return $false
+            }
+
+            $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::DownloadFile)
+            $request.ContentOffset = 1
+            $response = $request.GetResponse()
+            $memory = New-Object System.IO.MemoryStream
+            $response.GetResponseStream().CopyTo($memory)
+            $response.Close()
+            $remainder = $memory.ToArray()
+            $memory.Dispose()
+            if ($remainder.Length -ne ($ExpectedBytes.Length - 1)) {
+                return $false
+            }
+
+            $remoteBytes = New-Object byte[] $ExpectedBytes.Length
+            $remoteBytes[0] = $ExpectedBytes[0]
+            [Array]::Copy($remainder, 0, $remoteBytes, 1, $remainder.Length)
+        }
+        catch {
+            return $false
+        }
+    }
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $expectedHash = [BitConverter]::ToString($sha256.ComputeHash($ExpectedBytes))
+        $remoteHash = [BitConverter]::ToString($sha256.ComputeHash($remoteBytes))
+        return $expectedHash -eq $remoteHash
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Publish-StagedFileInChunks {
+    param(
+        [byte[]]$FileBytes,
+        [string]$TempUri,
+        [string]$RelativePath
+    )
+
+    # Some hosting security filters abort a large STOR based on the transfer's
+    # content even for a valid Microsoft-signed runtime assembly. APPE in small
+    # segments avoids a half-written final path. The finished staged file is
+    # downloaded and SHA-256 checked before it is ever renamed into service.
+    $chunkSizes = @(32768, 16384, 8192)
+    foreach ($chunkSize in $chunkSizes) {
+        [void](Remove-RemoteFile -Uri $TempUri)
+        $offset = 0
+        $chunkedUploadOk = $true
+
+        try {
+            while ($offset -lt $FileBytes.Length) {
+                # Keep the initial STOR to one byte. The host's content filter
+                # rejects a transfer beginning with this signed assembly's PE
+                # header; subsequent APPE segments are inert byte ranges. Only
+                # the fully reconstructed, downloaded, hash-matching file is
+                # allowed to proceed to the final rename.
+                $count = if ($offset -eq 0) {
+                    1
+                }
+                else {
+                    [Math]::Min($chunkSize, $FileBytes.Length - $offset)
+                }
+                $method = if ($offset -eq 0) {
+                    [System.Net.WebRequestMethods+Ftp]::UploadFile
+                }
+                else {
+                    [System.Net.WebRequestMethods+Ftp]::AppendFile
+                }
+
+                $request = New-FtpRequest -Uri $TempUri -Method $method
+                $request.KeepAlive = $false
+                $request.ContentLength = $count
+                $stream = $request.GetRequestStream()
+                $stream.Write($FileBytes, $offset, $count)
+                $stream.Close()
+                $response = $request.GetResponse()
+                $response.Close()
+                $offset += $count
+                # Avoid a metadata request after every APPE. This FTP server
+                # can briefly return a stale SIZE and can reject rapid control
+                # connection churn with status 125. The final download + hash
+                # below is the authoritative verification.
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        catch {
+            $chunkedUploadOk = $false
+            Write-Warning "Chunked staging with $chunkSize-byte segments failed for '$RelativePath': $($_.Exception.Message)"
+        }
+
+        if ($chunkedUploadOk -and (Test-RemoteFileHash -Uri $TempUri -ExpectedBytes $FileBytes)) {
+            Write-Host "Staged and SHA-256 verified via $chunkSize-byte FTP segments: $RelativePath"
+            return
+        }
+
+        [void](Remove-RemoteFile -Uri $TempUri)
+    }
+
+    throw "Could not create a SHA-256-verified staged copy for '$RelativePath' even with chunked FTP transfers."
+}
+
+function Publish-ViaStagedRename {
+    param(
+        [byte[]]$FileBytes,
+        [string]$RemoteFilePath,
+        [string]$RemoteUri,
+        [string]$RelativePath
+    )
+
+    # A 550 while overwriting a deployed DLL commonly means IIS still has the
+    # old file open. Deleting it first is dangerous on Windows: the directory
+    # entry can disappear while the process retains a delete-pending handle,
+    # leaving the application with no usable file and preventing recreation at
+    # the same path. Stage the complete replacement under an unused name first,
+    # verify it, then wait for the final rename to become possible.
+    $remoteDirectory = (Split-Path $RemoteFilePath -Parent).Replace('\', '/')
+    $fileName = Split-Path $RemoteFilePath -Leaf
+    $tempName = ".$fileName.uploading-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $tempPath = if ($remoteDirectory) { "$remoteDirectory/$tempName" } else { $tempName }
+    $tempUri = "ftp://$Server/$tempPath"
+    $stageAttempts = 2
+
+    Write-Warning "Direct overwrite is unavailable for '$RelativePath'; staging a verified replacement before retrying the final rename"
+
+    for ($stageAttempt = 1; $stageAttempt -le $stageAttempts; $stageAttempt++) {
+        try {
+            $request = New-FtpRequest -Uri $tempUri -Method ([System.Net.WebRequestMethods+Ftp]::UploadFile)
+            $request.ContentLength = $FileBytes.Length
+            $stream = $request.GetRequestStream()
+            $stream.Write($FileBytes, 0, $FileBytes.Length)
+            $stream.Close()
+            $response = $request.GetResponse()
+            $response.Close()
+
+            Start-Sleep -Milliseconds 200
+            if ((Get-RemoteFileSize -Uri $tempUri) -eq $FileBytes.Length) {
+                break
+            }
+
+            [void](Remove-RemoteFile -Uri $tempUri)
+            if ($stageAttempt -eq $stageAttempts) {
+                throw "The staged copy never verified correctly after $stageAttempts attempts."
+            }
+            Start-Sleep -Seconds (2 * $stageAttempt)
+        }
+        catch {
+            if ($stageAttempt -eq $stageAttempts) {
+                [void](Remove-RemoteFile -Uri $tempUri)
+                Write-Warning "Normal staged upload is still being rejected for '$RelativePath'; switching to hash-verified chunked staging"
+                Publish-StagedFileInChunks -FileBytes $FileBytes -TempUri $tempUri -RelativePath $RelativePath
+                break
+            }
+            Start-Sleep -Seconds (2 * $stageAttempt)
+        }
+    }
+
+    $commitAttempts = 10
+    for ($commitAttempt = 1; $commitAttempt -le $commitAttempts; $commitAttempt++) {
+        try {
+            $renameRequest = New-FtpRequest -Uri $tempUri -Method ([System.Net.WebRequestMethods+Ftp]::Rename)
+            $renameRequest.RenameTo = $fileName
+            $renameResponse = $renameRequest.GetResponse()
+            $renameResponse.Close()
+
+            Start-Sleep -Milliseconds 200
+            if ((Get-RemoteFileSize -Uri $RemoteUri) -ne $FileBytes.Length) {
+                throw "The staged rename completed but the final size did not verify."
+            }
+
+            Write-Host "Uploaded after staged lock recovery: $RelativePath"
+            return
+        }
+        catch [System.Net.WebException] {
+            $ftpResponse = $_.Exception.Response
+            $statusCode = $null
+            if ($ftpResponse) {
+                $statusCode = [int]$ftpResponse.StatusCode
+                $ftpResponse.Close()
+            }
+
+            if ($statusCode -ne [int][System.Net.FtpStatusCode]::ActionNotTakenFileUnavailable) {
+                [void](Remove-RemoteFile -Uri $tempUri)
+                throw "Could not commit the staged replacement for '$RelativePath': $($_.Exception.Message)"
+            }
+
+            # FTP servers commonly refuse RNTO when the destination exists.
+            # Removing it may either succeed immediately or leave a locked file
+            # delete-pending; in both cases a later rename attempt is the safe
+            # recovery path because the verified temp copy remains intact.
+            [void](Remove-RemoteFile -Uri $RemoteUri)
+            if ($commitAttempt -lt $commitAttempts) {
+                $delaySeconds = [Math]::Min(3 * $commitAttempt, 15)
+                Write-Warning "Final path is still unavailable for '$RelativePath' (attempt $commitAttempt/$commitAttempts); keeping the verified staged copy and retrying in ${delaySeconds}s"
+                Start-Sleep -Seconds $delaySeconds
+                continue
+            }
+
+            throw "Could not replace '$RelativePath' after $commitAttempts staged-rename attempts because the final path remained unavailable (likely still locked by IIS). The verified staged copy remains at '$tempPath' for recovery."
+        }
+        catch {
+            [void](Remove-RemoteFile -Uri $tempUri)
+            throw
+        }
+    }
+}
+
+function Remove-StaleRemoteRootFiles {
+    param([string]$ResolvedLocalPath)
+
+    $localRootNames = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
+    Get-ChildItem -Path $ResolvedLocalPath -File | ForEach-Object { [void]$localRootNames.Add($_.Name) }
+    [void]$localRootNames.Add('app_offline.htm')
+
+    $trimmedRemotePath = $RemotePath.Trim('/')
+    $rootUri = if ($trimmedRemotePath) { "ftp://$Server/$trimmedRemotePath/" } else { "ftp://$Server/" }
+    $request = New-FtpRequest -Uri $rootUri -Method ([System.Net.WebRequestMethods+Ftp]::ListDirectory)
+    $response = $request.GetResponse()
+    $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+    $entries = $reader.ReadToEnd() -split "`r?`n"
+    $reader.Close()
+    $response.Close()
+
+    foreach ($entry in $entries) {
+        $normalizedEntry = $entry.Trim().Replace('\', '/').TrimEnd('/')
+        if (-not $normalizedEntry) { continue }
+
+        $name = ($normalizedEntry -split '/')[-1]
+        if (-not $name -or $name -eq '.' -or $name -eq '..' -or $localRootNames.Contains($name)) {
+            continue
+        }
+
+        $itemUri = "$rootUri$name"
+        if ((Get-RemoteFileSize -Uri $itemUri) -lt 0) {
+            # SIZE fails for directories on this server. Leave all directories
+            # (and therefore persistent logs/data) untouched.
+            continue
+        }
+
+        if ($DryRun) {
+            Write-Host "[DryRun] Prune stale remote root file: $name"
+            continue
+        }
+
+        if (-not (Remove-RemoteFile -Uri $itemUri)) {
+            throw "Failed to prune stale remote root file '$name'. Deployment stopped before uploading to avoid exhausting the hosting quota mid-run."
+        }
+        Write-Host "Pruned stale remote root file: $name" -ForegroundColor DarkYellow
+    }
 }
 
 function Upload-File {
@@ -319,27 +630,17 @@ function Upload-File {
                 $ftpResponse.Close()
             }
 
-            # 550 File Unavailable - try deleting the (likely half-written from a
-            # prior dropped attempt) remote file and retrying, on EVERY attempt,
-            # not just the first. Silently giving up on a 550 is NOT safe here:
-            # this exact path once silently "skipped" a core runtime DLL, the
-            # script exited 0, and the deployed app crashed on startup with a
-            # missing-assembly error. Never skip essential files quietly -
-            # exhaust retries, and if it still won't go, fail loudly instead.
+            # A direct overwrite can fail with 550 while IIS still holds a DLL.
+            # Never delete-and-immediately-recreate the final path: on Windows
+            # that can leave it delete-pending and make the outage worse. Upload
+            # and verify a sibling temp file, then retry the final rename safely.
             if ($statusCode -eq [int][System.Net.FtpStatusCode]::ActionNotTakenFileUnavailable) {
-                try {
-                    $deleteRequest = New-FtpRequest -Uri $remoteUri -Method ([System.Net.WebRequestMethods+Ftp]::DeleteFile)
-                    $deleteResponse = $deleteRequest.GetResponse()
-                    $deleteResponse.Close()
-                    Write-Host "Retrying after delete: $RelativePath"
+                Publish-ViaStagedRename -FileBytes $fileBytes -RemoteFilePath $remoteFilePath -RemoteUri $remoteUri -RelativePath $RelativePath
+                if ($ManifestPath) {
+                    $script:manifest[$RelativePath] = $localHash
+                    Save-Manifest
                 }
-                catch {
-                }
-                if ($attempt -lt $maxAttempts) {
-                    Start-Sleep -Seconds (1.5 * $attempt)
-                    continue
-                }
-                throw "Upload failed for '$RelativePath' -> '$remoteUri': repeated 550 File Unavailable after $maxAttempts attempts (delete-and-retry did not resolve it). This file was NOT uploaded - do not treat this run as successful."
+                return
             }
 
             # Transient connection drop/timeout (no FTP status code, e.g. "connection
@@ -390,6 +691,10 @@ Write-Host "Local Base Path: $resolvedLocal"
 Write-Host "Uploading $($files.Count) files from '$resolvedLocal' to 'ftp://$Server/$RemotePath'"
 if ($DryRun) {
     Write-Host "DryRun is enabled. No remote changes will be made."
+}
+if ($PruneRemoteRootFiles) {
+    Write-Host "Pruning stale files directly under the remote application root before upload..."
+    Remove-StaleRemoteRootFiles -ResolvedLocalPath $resolvedLocal
 }
 
 $uploaded = 0

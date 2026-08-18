@@ -13,7 +13,7 @@ import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
 import type { ConnectionState, Position } from "../types/dashboard";
 import { numericSx } from "../theme";
-import { formatPrice, formatUsd } from "../utils/format";
+import { formatEaName, formatPrice, formatSide, formatUsd } from "../utils/format";
 
 interface OpenPositionsCardProps {
   positions: Position[];
@@ -77,7 +77,7 @@ export default function OpenPositionsCard({
                 <TableCell align="right">To SL / TP</TableCell>
                 <TableCell align="right">R:R</TableCell>
                 <TableCell align="right">P/L</TableCell>
-                <TableCell>Opened (Broker)</TableCell>
+                <TableCell>Opened (TH)</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -104,7 +104,7 @@ export default function OpenPositionsCard({
                             }}
                           />
                           <Typography variant="body2" color="text.secondary">
-                            {p.eaName}
+                            {formatEaName(p.eaName)}
                           </Typography>
                         </Stack>
                       </TableCell>
@@ -112,7 +112,7 @@ export default function OpenPositionsCard({
                       <TableCell>
                         <Chip
                           size="small"
-                          label={p.side}
+                          label={formatSide(p.side)}
                           color={p.side === "BUY" ? "success" : "error"}
                           sx={{ ...numericSx, fontWeight: 700, fontSize: 11.5 }}
                         />
@@ -132,8 +132,12 @@ export default function OpenPositionsCard({
                       <TableCell align="right" sx={numericSx}>
                         {formatPrice(p.takeProfit)}
                       </TableCell>
-                      <TableCell align="right" sx={{ ...numericSx, color: "text.secondary" }}>
-                        {distSl === null ? "-" : formatPrice(distSl)} /{" "}
+                      <TableCell
+                        align="right"
+                        sx={{ ...numericSx, color: "text.secondary", whiteSpace: "nowrap" }}
+                      >
+                        {distSl === null ? "-" : formatPrice(distSl)}
+                        {" / "}
                         {distTp === null ? "-" : formatPrice(distTp)}
                       </TableCell>
                       <TableCell align="right" sx={numericSx}>
@@ -145,7 +149,7 @@ export default function OpenPositionsCard({
                       >
                         {formatUsd(p.pnl, true)}
                       </TableCell>
-                      <TableCell sx={numericSx}>{p.openedAtBroker}</TableCell>
+                      <TableCell sx={numericSx}>{p.openedAtThai}</TableCell>
                     </TableRow>
                   );
                 })

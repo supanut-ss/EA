@@ -43,7 +43,7 @@ export interface Position {
   stopLoss: number;
   takeProfit: number;
   pnl: number;
-  openedAtBroker: string;
+  openedAtThai: string;
 }
 
 export interface ClosedTrade {
@@ -56,7 +56,9 @@ export interface ClosedTrade {
   openPrice: number;
   closePrice: number;
   pnl: number;
+  /** เวลา broker (ไม่แปลง) - ใช้ bucket session ใน TradeSessionAnalytics.tsx เท่านั้น อย่าเอาไปแสดงผลตรงๆ ใช้ closedAtThai แทน */
   closedAtBroker: string;
+  closedAtThai: string;
   closeReason: string;
 }
 
@@ -81,7 +83,7 @@ export interface EquityPoint {
 
 export interface ActivityLogEntry {
   id: string;
-  timeBroker: string;
+  timeThai: string;
   eaName: string;
   message: string;
   level: "ok" | "info" | "warn" | "error";

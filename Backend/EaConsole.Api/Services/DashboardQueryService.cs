@@ -12,6 +12,13 @@ namespace EaConsole.Api.Services;
 public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryService
 {
     private static readonly TimeSpan HistoryWindow = TimeSpan.FromDays(30);
+    private const int ThaiOffsetMinutes = 7 * 60;
+
+    // แปลงเวลา broker (ตามที่ EA ส่งมา ผูกกับ broker_gmt_offset_minutes ของ
+    // account นั้น) เป็นเวลาไทย (UTC+7 คงที่) - ไม่ใช่การเดา timezone ผู้ใช้
+    // (ดูหมายเหตุใน DashboardDtos.cs) แต่เป็นการแปลงที่รู้ offset ต้นทางแน่นอน
+    private static DateTime ToThaiTime(DateTime brokerTime, short brokerOffsetMinutes) =>
+        brokerTime.AddMinutes(-brokerOffsetMinutes).AddMinutes(ThaiOffsetMinutes);
 
     public async Task<List<AccountListItemDto>> GetAccountsAsync(CancellationToken ct = default)
     {
@@ -42,12 +49,12 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 
         var accountSummary = await BuildAccountSummaryAsync(accountId, latestSnapshot, brokerTodayStart, brokerTodayEnd, ct);
         var equityCurve = await BuildEquityCurveAsync(accountId, DateOnly.FromDateTime(historyStart), ct);
-        var openPositions = await BuildOpenPositionsAsync(accountId, ct);
-        var closedTrades = await BuildClosedTradesAsync(accountId, historyStart, ct);
-        var eaStatuses = await BuildEaStatusesAsync(accountId, brokerTodayStart, brokerTodayEnd, ct);
+        var openPositions = await BuildOpenPositionsAsync(accountId, account.BrokerGmtOffsetMinutes, ct);
+        var closedTrades = await BuildClosedTradesAsync(accountId, historyStart, account.BrokerGmtOffsetMinutes, ct);
+        var eaStatuses = await BuildEaStatusesAsync(accountId, brokerTodayStart, brokerTodayEnd, account.BrokerGmtOffsetMinutes, ct);
         var risk = await BuildRiskSnapshotAsync(accountId, latestSnapshot, brokerTodayStart, brokerTodayEnd, historyStart, ct);
         var performance = await BuildPerformanceAsync(accountId, brokerTodayStart, brokerTodayEnd, historyStart, ct);
-        var activityLog = await BuildActivityLogAsync(accountId, ct);
+        var activityLog = await BuildActivityLogAsync(accountId, account.BrokerGmtOffsetMinutes, ct);
 
         var offsetLabel = FormatGmtOffset(account.BrokerGmtOffsetMinutes);
 
@@ -127,7 +134,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             .ToList();
     }
 
-    private async Task<List<PositionDto>> BuildOpenPositionsAsync(int accountId, CancellationToken ct)
+    private async Task<List<PositionDto>> BuildOpenPositionsAsync(int accountId, short brokerOffsetMinutes, CancellationToken ct)
     {
         var trades = await db.Trades.AsNoTracking()
             .Include(t => t.Ea)
@@ -147,11 +154,11 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             StopLoss: t.StopLoss,
             TakeProfit: t.TakeProfit,
             Pnl: t.UnrealizedPnl,
-            OpenedAtBroker: t.OpenTimeBroker.ToString("HH:mm")
+            OpenedAtThai: ToThaiTime(t.OpenTimeBroker, brokerOffsetMinutes).ToString("HH:mm")
         )).ToList();
     }
 
-    private async Task<List<ClosedTradeDto>> BuildClosedTradesAsync(int accountId, DateTime since, CancellationToken ct)
+    private async Task<List<ClosedTradeDto>> BuildClosedTradesAsync(int accountId, DateTime since, short brokerOffsetMinutes, CancellationToken ct)
     {
         var trades = await db.Trades.AsNoTracking()
             .Include(t => t.Ea)
@@ -172,12 +179,13 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             ClosePrice: t.ClosePrice,
             Pnl: t.Pnl,
             ClosedAtBroker: t.CloseTimeBroker!.Value.ToString("HH:mm"),
+            ClosedAtThai: ToThaiTime(t.CloseTimeBroker!.Value, brokerOffsetMinutes).ToString("HH:mm"),
             CloseReason: EnumDbMaps.PrettifyCloseReason(t.CloseReason)
         )).ToList();
     }
 
     private async Task<List<EaStatusDto>> BuildEaStatusesAsync(
-        int accountId, DateTime dayStart, DateTime dayEnd, CancellationToken ct)
+        int accountId, DateTime dayStart, DateTime dayEnd, short brokerOffsetMinutes, CancellationToken ct)
     {
         var eas = await db.Eas.AsNoTracking()
             .Where(e => e.AccountId == accountId)
@@ -223,7 +231,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
                 Timeframe: ea.Timeframe,
                 State: ea.Status.ToDb(),
                 SessionWindow: sessionWindow,
-                LastSignal: hasLastSignal ? $"{lastSignal!.Message} · {lastSignal.EventTimeBroker:HH:mm}" : "-",
+                LastSignal: hasLastSignal ? $"{lastSignal!.Message} · {ToThaiTime(lastSignal.EventTimeBroker, brokerOffsetMinutes):HH:mm}" : "-",
                 TradesToday: tradesToday,
                 MaxTradesPerDay: ea.MaxTradesPerDay ?? 0,
                 Note: ea.Notes
@@ -366,18 +374,18 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
         string RangeKey, int TradesCount, decimal WinRatePct, decimal ProfitFactor,
         decimal Expectancy, decimal AvgWin, decimal AvgLoss);
 
-    private async Task<List<ActivityLogEntryDto>> BuildActivityLogAsync(int accountId, CancellationToken ct)
+    private async Task<List<ActivityLogEntryDto>> BuildActivityLogAsync(int accountId, short brokerOffsetMinutes, CancellationToken ct)
     {
         var logs = await db.ActivityLog.AsNoTracking()
             .Include(l => l.Ea)
             .Where(l => l.AccountId == accountId)
             .OrderByDescending(l => l.EventTimeBroker)
-            .Take(20)
+            .Take(10)
             .ToListAsync(ct);
 
         return logs.Select(l => new ActivityLogEntryDto(
             Id: l.LogId.ToString(),
-            TimeBroker: l.EventTimeBroker.ToString("HH:mm"),
+            TimeThai: ToThaiTime(l.EventTimeBroker, brokerOffsetMinutes).ToString("HH:mm"),
             EaName: l.Ea?.Name ?? "System",
             Message: l.Message,
             Level: l.Level.ToDb()

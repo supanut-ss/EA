@@ -35,17 +35,14 @@ Backend/EaConsole.Api/wwwroot/
 # uploads - machine-specific optimization state, not meaningful to share) ----------
 /.deploy-cache/
 
-# ---------- New FTPS deploy system (deployment/) runtime output - build
-# artifacts, downloaded remote manifests, local logs; never commit. The
-# scripts themselves live in /deployment/ (tracked) and are unaffected. ----------
+# ---------- Old FTPS deploy system (deployment/) runtime output - retired,
+# folder removed in favor of deploy-single-host.ps1; left ignored in case
+# stray local build output remains on a dev machine ----------
 /.deploy/
 
-# ---------- Local deploy credentials wrapper - deployment/run-deploy.local.ps1
-# holds real FTP/DB/API secrets filled in by hand, never commit it ----------
-deployment/*.local.ps1
-
-# ---------- Simple single-host deploy script (eTPL-style) - has real FTP/DB/
-# API secrets hardcoded inline by design, never commit it ----------
+# ---------- Local single-host deploy wrapper - copied from
+# deploy-single-host.example.ps1 and allowed to reference machine secrets.
+# Shared behavior belongs in deploy-single-host.core.ps1. ----------
 /deploy-single-host.ps1
 
 # ---------- SQL local data / dumps ----------

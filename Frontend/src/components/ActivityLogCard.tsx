@@ -7,6 +7,7 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import type { ActivityLogEntry } from "../types/dashboard";
 import { numericSx } from "../theme";
+import { formatEaName } from "../utils/format";
 
 interface ActivityLogCardProps {
   entries: ActivityLogEntry[];
@@ -41,7 +42,7 @@ export default function ActivityLogCard({ entries }: ActivityLogCardProps) {
               sx={{ px: 2, py: 1, fontSize: 12.5 }}
             >
               <Typography variant="caption" sx={{ ...numericSx, color: "text.disabled", width: 44 }}>
-                {entry.timeBroker}
+                {entry.timeThai}
               </Typography>
               <Box
                 sx={{
@@ -55,7 +56,7 @@ export default function ActivityLogCard({ entries }: ActivityLogCardProps) {
               />
               <Typography variant="caption" color="text.primary">
                 <Box component="span" sx={{ color: "text.secondary", fontWeight: 600, mr: 0.5 }}>
-                  {entry.eaName}
+                  {formatEaName(entry.eaName)}
                 </Box>
                 {entry.message}
               </Typography>

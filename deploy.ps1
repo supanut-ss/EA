@@ -161,7 +161,23 @@ Set-WebConfigEnvVar -XmlDoc $webConfig -AspNetCoreNode $aspNetCoreNode -Name "AS
 Set-WebConfigEnvVar -XmlDoc $webConfig -AspNetCoreNode $aspNetCoreNode -Name "ConnectionStrings__EaConsole" -Value $DbConnStr
 Set-WebConfigEnvVar -XmlDoc $webConfig -AspNetCoreNode $aspNetCoreNode -Name "Cors__AllowedOrigins__0" -Value $CorsOrigin
 Set-WebConfigEnvVar -XmlDoc $webConfig -AspNetCoreNode $aspNetCoreNode -Name "Ingest__ApiKey" -Value $IngestApiKey
+
+# Real incident (2026-08-17): /api/ingest/trade returned bare HTTP 500 twice
+# with zero trace anywhere - `dotnet publish`'s default web.config ships
+# stdoutLogEnabled="false", so unhandled exceptions in Production just
+# vanish. Flip it on so future failures leave a stack trace under
+# deploy/backend/logs/ (already confirmed not web-accessible - see
+# Backend/DEPLOYMENT.md) instead of being undiagnosable blind spots.
+$aspNetCoreNode.SetAttribute("stdoutLogEnabled", "true")
+Write-Host "  -> Set stdoutLogEnabled=true" -ForegroundColor Gray
 $webConfig.Save($webConfigPath)
+
+# ANCM only writes into logs/ if the directory already exists on the
+# server - FTP sync only creates directories that contain an uploaded
+# file, so an empty logs/ folder would never get created remotely. Drop a
+# placeholder so the directory (and therefore logging) actually exists.
+New-Item -Path "$repoRoot\deploy\backend\logs" -ItemType Directory -Force | Out-Null
+Set-Content -Path "$repoRoot\deploy\backend\logs\.keep" -Value "placeholder so FTP sync creates this directory" -Force
 
 # ---------------------------------------------------------------------------
 # 4. Maintenance page content (uploaded directly, outside the manifest - it

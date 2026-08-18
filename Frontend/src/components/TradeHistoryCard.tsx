@@ -15,7 +15,7 @@ import Tabs from "@mui/material/Tabs";
 import Typography from "@mui/material/Typography";
 import type { ClosedTrade, Performance } from "../types/dashboard";
 import { numericSx } from "../theme";
-import { formatPrice, formatUsd } from "../utils/format";
+import { formatEaName, formatPrice, formatSide, formatUsd } from "../utils/format";
 
 interface TradeHistoryCardProps {
   trades: ClosedTrade[];
@@ -78,7 +78,7 @@ export default function TradeHistoryCard({
                 <TableCell align="right">Open</TableCell>
                 <TableCell align="right">Close</TableCell>
                 <TableCell align="right">P/L</TableCell>
-                <TableCell>ปิดไม้ (Broker)</TableCell>
+                <TableCell>ปิดไม้ (ไทย)</TableCell>
                 <TableCell>เหตุผล</TableCell>
               </TableRow>
             </TableHead>
@@ -103,7 +103,7 @@ export default function TradeHistoryCard({
                           }}
                         />
                         <Typography variant="body2" color="text.secondary">
-                          {t.eaName}
+                          {formatEaName(t.eaName)}
                         </Typography>
                       </Stack>
                     </TableCell>
@@ -111,7 +111,7 @@ export default function TradeHistoryCard({
                     <TableCell>
                       <Chip
                         size="small"
-                        label={t.side}
+                        label={formatSide(t.side)}
                         color={t.side === "BUY" ? "success" : "error"}
                         sx={{ ...numericSx, fontWeight: 700, fontSize: 11.5 }}
                       />
@@ -131,7 +131,7 @@ export default function TradeHistoryCard({
                     >
                       {formatUsd(t.pnl, true)}
                     </TableCell>
-                    <TableCell sx={numericSx}>{t.closedAtBroker}</TableCell>
+                    <TableCell sx={numericSx}>{t.closedAtThai}</TableCell>
                     <TableCell>{t.closeReason}</TableCell>
                   </TableRow>
                 ))
