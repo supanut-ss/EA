@@ -22,27 +22,40 @@ interface TradeHistoryCardProps {
   eaFilter: string;
   emptyMessage: string;
   performance: Performance;
+  brokerToday: string;
 }
 
-const RANGES: { label: string; key: keyof Performance }[] = [
-  { label: "วันนี้", key: "today" },
-  { label: "7 วัน", key: "last7d" },
-  { label: "30 วัน", key: "last30d" },
+const RANGES: { label: string; key: keyof Performance; maxAgeDays: number }[] = [
+  { label: "วันนี้", key: "today", maxAgeDays: 0 },
+  { label: "7 วัน", key: "last7d", maxAgeDays: 6 },
+  { label: "30 วัน", key: "last30d", maxAgeDays: 29 },
 ];
+
+// จำนวนวันปฏิทินระหว่าง broker "วันนี้" กับวันที่ปิดไม้ - ทั้งคู่เป็นวันที่
+// ปฏิทินของ broker ล้วนๆ (yyyy-MM-dd ไม่มีเวลา/timezone ปน) จึงลบกันตรงๆ
+// ได้แม่นยำ ไม่ต้องเดา timezone ของผู้ใช้
+function daysAgo(brokerToday: string, closedDateBroker: string): number {
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.round(
+    (new Date(`${brokerToday}T00:00:00Z`).getTime() -
+      new Date(`${closedDateBroker}T00:00:00Z`).getTime()) /
+      msPerDay,
+  );
+}
 
 export default function TradeHistoryCard({
   trades,
   eaFilter,
   emptyMessage,
   performance,
+  brokerToday,
 }: TradeHistoryCardProps) {
-  // แท็บช่วงเวลาสลับเฉพาะ "สถิติ" ด้านบน (win rate/PF/expectancy ต่อช่วง
-  // จาก backend) - ตารางด้านล่างยังคงโชว์ trade ล่าสุด (30 วัน) เหมือนเดิม
-  // เพราะ closedAtBroker เป็น time-only ไม่มีวันที่ ทำให้ frontend แยก
-  // "ของวันนี้เท่านั้น" จากรายการดิบเองไม่ได้แม่นยำ
   const [range, setRange] = useState(0);
   const stats = performance[RANGES[range].key];
-  const filtered = eaFilter === "all" ? trades : trades.filter((t) => t.eaId === eaFilter);
+  const maxAgeDays = RANGES[range].maxAgeDays;
+  const filtered = trades
+    .filter((t) => eaFilter === "all" || t.eaId === eaFilter)
+    .filter((t) => daysAgo(brokerToday, t.closedDateBroker) <= maxAgeDays);
 
   return (
     <Card>

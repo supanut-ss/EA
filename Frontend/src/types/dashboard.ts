@@ -56,6 +56,8 @@ export interface ClosedTrade {
   openPrice: number;
   closePrice: number;
   pnl: number;
+  /** วันที่ปฏิทินของ broker (yyyy-MM-dd) - ใช้เทียบกับ DashboardSnapshot.brokerToday เพื่อกรองตารางตามแท็บช่วงเวลาเท่านั้น อย่าเอาไปแสดงผล */
+  closedDateBroker: string;
   /** เวลา broker (ไม่แปลง) - ใช้ bucket session ใน TradeSessionAnalytics.tsx เท่านั้น อย่าเอาไปแสดงผลตรงๆ ใช้ closedAtThai แทน */
   closedAtBroker: string;
   closedAtThai: string;
@@ -117,6 +119,8 @@ export interface DashboardSnapshot {
   connection: ConnectionState;
   lastSyncedAt: string;
   brokerTime: string;
+  /** วันที่ปฏิทินของ broker (yyyy-MM-dd) - ใช้เป็นจุดอ้างอิง "วันนี้" เทียบกับ closedDateBroker ของแต่ละ trade */
+  brokerToday: string;
   accountInfo: AccountInfo;
   account: AccountSummary;
   equityCurve: EquityPoint[];

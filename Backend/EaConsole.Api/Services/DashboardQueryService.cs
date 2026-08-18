@@ -69,6 +69,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             Connection: latestSnapshot.ConnectionState.ToDb(),
             LastSyncedAt: latestSnapshot.CreatedAt,
             BrokerTime: $"{brokerNow:HH:mm:ss} {offsetLabel}",
+            BrokerToday: DateOnly.FromDateTime(brokerTodayStart),
             AccountInfo: accountInfo,
             Account: accountSummary,
             EquityCurve: equityCurve,
@@ -178,6 +179,7 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
             OpenPrice: t.OpenPrice,
             ClosePrice: t.ClosePrice,
             Pnl: t.Pnl,
+            ClosedDateBroker: DateOnly.FromDateTime(t.CloseTimeBroker!.Value),
             ClosedAtBroker: t.CloseTimeBroker!.Value.ToString("HH:mm"),
             ClosedAtThai: ToThaiTime(t.CloseTimeBroker!.Value, brokerOffsetMinutes).ToString("HH:mm"),
             CloseReason: EnumDbMaps.PrettifyCloseReason(t.CloseReason)

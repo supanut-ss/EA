@@ -18,6 +18,7 @@ public record DashboardSnapshotDto(
     string Connection,
     DateTime LastSyncedAt,
     string BrokerTime,
+    DateOnly BrokerToday,
     AccountInfoDto AccountInfo,
     AccountSummaryDto Account,
     List<EquityPointDto> EquityCurve,
@@ -82,6 +83,10 @@ public record PositionDto(
 // TradeSessionAnalytics.tsx ฝั่ง frontend ใช้ bucket ชั่วโมงเข้า session
 // Asian/London/NY ซึ่งอิงกับเวลา broker ไม่ใช่เวลาไทย - แปลงเป็นไทยแล้วจะ
 // ทำให้ bucket ผิด
+// ClosedDateBroker คือวันที่ปฏิทินของ broker (ไม่ใช่เวลาไทย/เวลาเครื่อง
+// ผู้ใช้) ให้ frontend เทียบกับ BrokerToday ของ snapshot เพื่อกรองตาราง
+// ตามแท็บ วันนี้/7 วัน/30 วัน ได้แม่นยำ - ก่อนหน้านี้ไม่มี field วันที่เลย
+// ทำให้แท็บกรองตารางไม่ได้จริง (ClosedAtBroker เป็น time-only)
 public record ClosedTradeDto(
     string Id,
     string EaId,
@@ -92,6 +97,7 @@ public record ClosedTradeDto(
     decimal OpenPrice,
     decimal? ClosePrice,
     decimal? Pnl,
+    DateOnly ClosedDateBroker,
     string ClosedAtBroker,
     string ClosedAtThai,
     string? CloseReason

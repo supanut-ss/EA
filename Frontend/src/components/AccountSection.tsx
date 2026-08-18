@@ -153,6 +153,7 @@ export default function AccountSection({
                     eaFilter={eaFilter}
                     emptyMessage="ยังไม่มีประวัติการเทรดวันนี้"
                     performance={data.performance}
+                    brokerToday={data.brokerToday}
                   />
                   <TradeSessionAnalytics trades={data.closedTrades} />
                 </Stack>

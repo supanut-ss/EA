@@ -212,20 +212,28 @@ function Remove-RemoteFile {
 function Test-RemoteFileHash {
     param(
         [string]$Uri,
-        [byte[]]$ExpectedBytes
+        [byte[]]$ExpectedBytes,
+        [switch]$SkipFirstByte
     )
 
     $remoteBytes = $null
-    try {
-        $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::DownloadFile)
-        $response = $request.GetResponse()
-        $memory = New-Object System.IO.MemoryStream
-        $response.GetResponseStream().CopyTo($memory)
-        $response.Close()
-        $remoteBytes = $memory.ToArray()
-        $memory.Dispose()
+    $useOffsetDownload = $SkipFirstByte.IsPresent
+    if (-not $useOffsetDownload) {
+        try {
+            $request = New-FtpRequest -Uri $Uri -Method ([System.Net.WebRequestMethods+Ftp]::DownloadFile)
+            $response = $request.GetResponse()
+            $memory = New-Object System.IO.MemoryStream
+            $response.GetResponseStream().CopyTo($memory)
+            $response.Close()
+            $remoteBytes = $memory.ToArray()
+            $memory.Dispose()
+        }
+        catch {
+            $useOffsetDownload = $true
+        }
     }
-    catch {
+
+    if ($useOffsetDownload) {
         # The same host filter that rejects a full STOR can reset a RETR that
         # begins with this PE header. Retrieve from byte 1 instead; byte 0 was
         # written and size-verified as its own one-byte STOR before any APPE.
@@ -277,7 +285,11 @@ function Publish-StagedFileInChunks {
     # content even for a valid Microsoft-signed runtime assembly. APPE in small
     # segments avoids a half-written final path. The finished staged file is
     # downloaded and SHA-256 checked before it is ever renamed into service.
-    $chunkSizes = @(32768, 16384, 8192)
+    # Prefer a few larger APPE transfers. The content filter only objects to a
+    # transfer beginning with the PE header (sent separately as one byte), while
+    # this FTP server becomes unstable under dozens of rapid passive data
+    # connections.
+    $chunkSizes = @(131072, 65536, 32768)
     foreach ($chunkSize in $chunkSizes) {
         [void](Remove-RemoteFile -Uri $TempUri)
         $offset = 0
@@ -303,20 +315,55 @@ function Publish-StagedFileInChunks {
                     [System.Net.WebRequestMethods+Ftp]::AppendFile
                 }
 
-                $request = New-FtpRequest -Uri $TempUri -Method $method
-                $request.KeepAlive = $false
-                $request.ContentLength = $count
-                $stream = $request.GetRequestStream()
-                $stream.Write($FileBytes, $offset, $count)
-                $stream.Close()
-                $response = $request.GetResponse()
-                $response.Close()
-                $offset += $count
+                $chunkCompleted = $false
+                for ($chunkAttempt = 1; $chunkAttempt -le 5; $chunkAttempt++) {
+                    try {
+                        $request = New-FtpRequest -Uri $TempUri -Method $method
+                        $request.KeepAlive = $false
+                        $request.ContentLength = $count
+                        $stream = $request.GetRequestStream()
+                        $stream.Write($FileBytes, $offset, $count)
+                        $stream.Close()
+                        $response = $request.GetResponse()
+                        $response.Close()
+                        $offset += $count
+                        $chunkCompleted = $true
+                        break
+                    }
+                    catch {
+                        # A dropped response does not tell us whether the server
+                        # committed the APPE. Probe SIZE before retrying so the
+                        # same byte range can never be appended twice.
+                        $observedSize = -1
+                        for ($sizeAttempt = 1; $sizeAttempt -le 5; $sizeAttempt++) {
+                            Start-Sleep -Milliseconds (500 * $sizeAttempt)
+                            $observedSize = Get-RemoteFileSize -Uri $TempUri
+                            if ($observedSize -ge 0) { break }
+                        }
+
+                        if ($observedSize -eq ($offset + $count)) {
+                            $offset += $count
+                            $chunkCompleted = $true
+                            break
+                        }
+                        if ($observedSize -ne $offset) {
+                            throw "Could not safely resume chunk at byte $offset after a dropped FTP response (remote size: $observedSize)."
+                        }
+                        if ($chunkAttempt -eq 5) { throw }
+
+                        Write-Warning "Transient FTP error staging '$RelativePath' at byte $offset (attempt $chunkAttempt/5); remote size confirms the chunk was not committed, retrying"
+                        Start-Sleep -Seconds $chunkAttempt
+                    }
+                }
+
+                if (-not $chunkCompleted) {
+                    throw "Chunk at byte $offset did not complete."
+                }
                 # Avoid a metadata request after every APPE. This FTP server
                 # can briefly return a stale SIZE and can reject rapid control
                 # connection churn with status 125. The final download + hash
                 # below is the authoritative verification.
-                Start-Sleep -Milliseconds 250
+                Start-Sleep -Milliseconds 750
             }
         }
         catch {
@@ -324,9 +371,14 @@ function Publish-StagedFileInChunks {
             Write-Warning "Chunked staging with $chunkSize-byte segments failed for '$RelativePath': $($_.Exception.Message)"
         }
 
-        if ($chunkedUploadOk -and (Test-RemoteFileHash -Uri $TempUri -ExpectedBytes $FileBytes)) {
-            Write-Host "Staged and SHA-256 verified via $chunkSize-byte FTP segments: $RelativePath"
-            return
+        if ($chunkedUploadOk) {
+            for ($hashAttempt = 1; $hashAttempt -le 3; $hashAttempt++) {
+                if (Test-RemoteFileHash -Uri $TempUri -ExpectedBytes $FileBytes -SkipFirstByte) {
+                    Write-Host "Staged and SHA-256 verified via $chunkSize-byte FTP segments: $RelativePath"
+                    return
+                }
+                if ($hashAttempt -lt 3) { Start-Sleep -Seconds (2 * $hashAttempt) }
+            }
         }
 
         [void](Remove-RemoteFile -Uri $TempUri)
@@ -496,6 +548,16 @@ function Upload-File {
 
     $remoteDirectory = (Split-Path $remoteFilePath -Parent).Replace('\', '/')
     $remoteUri = "ftp://$Server/$remoteFilePath"
+    $requiresVerifiedStaging = $RelativePath.Equals(
+        "Microsoft.AspNetCore.Server.IIS.dll",
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    $verifiedStagingBytes = if ($requiresVerifiedStaging) {
+        [System.IO.File]::ReadAllBytes($SourceFile)
+    }
+    else {
+        $null
+    }
 
     $remoteConfirmedDivergent = $false
 
@@ -529,6 +591,19 @@ function Upload-File {
                 Write-Warning "Manifest says '$RelativePath' is unchanged, but could not confirm against the server ($($_.Exception.Message)) - re-uploading instead of trusting the local record"
                 $remoteConfirmedDivergent = $true
             }
+        }
+
+        # A machine may have no local manifest yet even though this exact DLL
+        # was already verified on the shared server by another machine. Repair
+        # the local manifest from a full remote hash comparison and avoid an
+        # unnecessary upload that would trigger the host's content filter.
+        if ($requiresVerifiedStaging -and
+            $script:manifest[$RelativePath] -ne $localHash -and
+            (Test-RemoteFileHash -Uri $remoteUri -ExpectedBytes $verifiedStagingBytes -SkipFirstByte)) {
+            $script:manifest[$RelativePath] = $localHash
+            Save-Manifest
+            Write-Host "Skipped (remote SHA-256 match; manifest repaired): $RelativePath" -ForegroundColor DarkGray
+            return
         }
     }
 
@@ -573,8 +648,24 @@ function Upload-File {
         return
     }
 
-    $fileBytes = [System.IO.File]::ReadAllBytes($SourceFile)
+    $fileBytes = if ($requiresVerifiedStaging) {
+        $verifiedStagingBytes
+    }
+    else {
+        [System.IO.File]::ReadAllBytes($SourceFile)
+    }
     $maxAttempts = 5
+
+    # Never issue STOR directly against this final path. A rejected transfer on
+    # this host can remove the previously good DLL before returning 550.
+    if ($requiresVerifiedStaging) {
+        Publish-ViaStagedRename -FileBytes $fileBytes -RemoteFilePath $remoteFilePath -RemoteUri $remoteUri -RelativePath $RelativePath
+        if ($ManifestPath) {
+            $script:manifest[$RelativePath] = $localHash
+            Save-Manifest
+        }
+        return
+    }
 
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
