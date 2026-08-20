@@ -29,6 +29,15 @@
 #property strict
 
 #include <Trade\Trade.mqh>
+
+// This EA's own ingest defaults - matches its real registration in the
+// backend DB (ea_id=1, "Trend Breakout") and the live production host, so
+// a fresh attach no longer needs manual reconfiguration (see
+// EaIngestClient.mqh for how these override the shared localhost fallback -
+// without this, a reset/fresh-attach input would silently point at
+// http://localhost:5008 instead of production).
+#define INGEST_DEFAULT_EA_ID 1
+#define INGEST_DEFAULT_BASE_URL "https://ea.thaipesleague.com"
 #include <EaIngestClient.mqh>
 
 CTrade trade;
@@ -343,14 +352,20 @@ bool IsLossGuardBlocking()
 //+------------------------------------------------------------------+
 void CheckForEntry()
 {
-   if(CountOpenPositions() >= InpMaxOpenPositions) return;
-   if(tradesToday >= InpMaxTradesPerDay) return;
-   if(!IsWithinSession()) return;
-   if(!IsSpreadOk()) return;
-   if(IsLossGuardBlocking()) return;
+   if(CountOpenPositions() >= InpMaxOpenPositions) { Print("Entry skip: max open positions (", InpMaxOpenPositions, ")"); return; }
+   if(tradesToday >= InpMaxTradesPerDay) { Print("Entry skip: daily trade cap reached (", InpMaxTradesPerDay, ")"); return; }
+   if(!IsWithinSession())
+   {
+      MqlDateTime nowDt;
+      TimeToStruct(TimeCurrent(), nowDt);
+      Print("Entry skip: outside session (hour=", nowDt.hour, " dow=", nowDt.day_of_week, ")");
+      return;
+   }
+   if(!IsSpreadOk()) { Print("Entry skip: spread ", (int)SymbolInfoInteger(symbolName, SYMBOL_SPREAD), " > max ", (int)InpMaxSpreadPoints, " pts"); return; }
+   if(IsLossGuardBlocking()) { Print("Entry skip: loss guard active"); return; }
 
    int trend = GetTrendBias();
-   if(trend == 0) return;
+   if(trend == 0) { Print("Entry skip: H1 trend unclear"); return; }
 
    double channelHigh, channelLow;
    if(!GetDonchianLevels(channelHigh, channelLow)) return;
@@ -387,6 +402,11 @@ void CheckForEntry()
          "Breakout SELL signal: close %s < Donchian low %s (-buffer %s), H1 trend bearish",
          DoubleToString(closeLast, 2), DoubleToString(channelLow, 2), DoubleToString(buffer, 2)));
       OpenTrade(ORDER_TYPE_SELL, sl, tp);
+   }
+   else
+   {
+      Print("Entry skip: trend=", trend, " no Donchian breakout (close=", DoubleToString(closeLast, 2),
+            " high=", DoubleToString(channelHigh, 2), " low=", DoubleToString(channelLow, 2), ")");
    }
 }
 
@@ -487,7 +507,11 @@ void ManagePositionStops()
 
          desiredSl = NormalizeDouble(desiredSl, digits);
          if(desiredSl > posSl && desiredSl < bid)
-            trade.PositionModify(ticket, desiredSl, posTp);
+         {
+            if(!trade.PositionModify(ticket, desiredSl, posTp))
+               Print("Stop modify failed: ticket=", ticket, " BUY SL->", desiredSl,
+                     " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         }
       }
       else if(type == POSITION_TYPE_SELL)
       {
@@ -510,7 +534,11 @@ void ManagePositionStops()
          if(desiredSl == DBL_MAX) continue;
          desiredSl = NormalizeDouble(desiredSl, digits);
          if((posSl == 0 || desiredSl < posSl) && desiredSl > ask)
-            trade.PositionModify(ticket, desiredSl, posTp);
+         {
+            if(!trade.PositionModify(ticket, desiredSl, posTp))
+               Print("Stop modify failed: ticket=", ticket, " SELL SL->", desiredSl,
+                     " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         }
       }
    }
 }

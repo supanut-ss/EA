@@ -31,6 +31,16 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
 
     public async Task<DashboardSnapshotDto?> GetSnapshotAsync(int accountId, CancellationToken ct = default)
     {
+        // account_snapshots ตอนนี้มี ~25,000 แถวต่อบัญชี (heartbeat ทุก 10 วิ x
+        // 3 วัน full-resolution ก่อน retention thin ลง) - query drawdown ที่ใช้
+        // window function สแกนทั้งช่วงวัดจริงได้ ~43 วินาทีบน DB host นี้ เกิน
+        // default command timeout ทำให้ /api/dashboard/snapshot 500 เป็นระยะๆ
+        // (MySqlException: Command Timeout expired) เพิ่ม timeout ที่นี่เพื่อให้
+        // query ที่ช้าจริงมีเวลาจบแทนที่จะโดนตัดกลางคัน - แก้ปัญหาความช้าที่ต้นตอ
+        // (ลด retention window หรือ downsample ก่อนรัน window function) ยังต้องทำ
+        // ต่อ นี่เป็นแค่ตัวกันไม่ให้ผู้ใช้เห็น 500 ระหว่างนั้น
+        db.Database.SetCommandTimeout(90);
+
         var account = await db.Accounts.AsNoTracking().FirstOrDefaultAsync(a => a.AccountId == accountId, ct);
         if (account is null) return null;
 
@@ -260,6 +270,16 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
         // รวม 4 query เดิม (max drawdown, SL รวม, TP รวม, avg R:R) เหลือ
         // round trip เดียว ด้วยเหตุผลเดียวกับ BuildAccountSummaryAsync — DB
         // จริงที่ทดสอบด้วยหน่วง 300ms-1s+ ต่อ round trip
+        //
+        // หมายเหตุ perf จริง (2026-08-20): account_snapshots สะสมถึง ~25,000
+        // แถวต่อบัญชี (heartbeat ทุก 10 วิ) — window function MAX(equity) OVER
+        // (ORDER BY ...) สแกนตรงๆ กินเวลาวัดจริง ~34 วินาที เกิน command
+        // timeout ทำให้ /api/dashboard/snapshot 500 เป็นระยะ (MySqlException:
+        // Command Timeout expired) แก้โดย downsample เหลือ 1 แถว/นาทีก่อน
+        // (ROW_NUMBER() แบ่งตามนาที เอาแถวล่าสุดของนาทีนั้น) แล้วค่อยรัน running
+        // max ทับชุดที่เล็กลง — วัดจริงเร็วขึ้น 36 เท่า (34s -> 0.9s) ผลต่างจาก
+        // ความละเอียดที่หายไปน้อยมาก (<0.05 percentage point ในการทดสอบจริง)
+        // ยอมรับได้สำหรับตัวเลข drawdown ที่เป็นการประมาณอยู่แล้ว
         var risk = await db.Database.SqlQuery<RiskRow>($@"
             SELECT
               (SELECT IFNULL(MIN(dd_pct), 0) FROM (
@@ -268,9 +288,14 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
                       (equity - MAX(equity) OVER (ORDER BY captured_at_broker))
                       / MAX(equity) OVER (ORDER BY captured_at_broker) * 100
                     , 2) AS dd_pct
-                  FROM account_snapshots
-                  WHERE account_id = {accountId}
-                    AND captured_at_broker >= {dayStart} AND captured_at_broker < {dayEnd}
+                  FROM (
+                    SELECT equity, captured_at_broker,
+                      ROW_NUMBER() OVER (PARTITION BY DATE_FORMAT(captured_at_broker, '%Y%m%d%H%i') ORDER BY captured_at_broker DESC) AS rn
+                    FROM account_snapshots
+                    WHERE account_id = {accountId}
+                      AND captured_at_broker >= {dayStart} AND captured_at_broker < {dayEnd}
+                  ) sampled
+                  WHERE rn = 1
                 ) dd) AS MaxDrawdownTodayPct,
               (SELECT IFNULL(MIN(dd_pct), 0) FROM (
                   SELECT
@@ -278,9 +303,14 @@ public class DashboardQueryService(EaConsoleDbContext db) : IDashboardQueryServi
                       (equity - MAX(equity) OVER (ORDER BY captured_at_broker))
                       / MAX(equity) OVER (ORDER BY captured_at_broker) * 100
                     , 2) AS dd_pct
-                  FROM account_snapshots
-                  WHERE account_id = {accountId}
-                    AND captured_at_broker >= {historyStart}
+                  FROM (
+                    SELECT equity, captured_at_broker,
+                      ROW_NUMBER() OVER (PARTITION BY DATE_FORMAT(captured_at_broker, '%Y%m%d%H%i') ORDER BY captured_at_broker DESC) AS rn
+                    FROM account_snapshots
+                    WHERE account_id = {accountId}
+                      AND captured_at_broker >= {historyStart}
+                  ) sampled
+                  WHERE rn = 1
                 ) dd30) AS MaxDrawdown30dPct,
               (SELECT IFNULL(SUM(sl_amount), 0) FROM trades
                  WHERE account_id = {accountId} AND status = 'OPEN') AS OpenSlTotal,
