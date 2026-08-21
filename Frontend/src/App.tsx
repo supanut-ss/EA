@@ -47,7 +47,7 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Box sx={{ maxWidth: 1320, mx: "auto", px: { xs: 1.5, sm: 3 }, py: 2.5, pb: 8 }}>
+      <Box sx={{ maxWidth: 1480, mx: "auto", px: { xs: 1.5, sm: 3 }, py: 2.5, pb: 8 }}>
         <Stack gap={2.5}>
           <Box
             sx={{

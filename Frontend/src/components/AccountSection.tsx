@@ -135,7 +135,7 @@ export default function AccountSection({
               <Box
                 sx={{
                   display: "grid",
-                  gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) 300px" },
+                  gridTemplateColumns: { xs: "1fr", lg: "minmax(0, 1fr) 340px" },
                   gap: 1.5,
                   alignItems: "start",
                 }}
@@ -156,12 +156,12 @@ export default function AccountSection({
                     brokerToday={data.brokerToday}
                   />
                   <TradeSessionAnalytics trades={data.closedTrades} />
+                  <ActivityLogCard entries={data.activityLog} />
                 </Stack>
 
-                <Stack gap={1.5} minWidth={0}>
+                <Stack gap={1.5} minWidth={0} sx={{ alignSelf: "start" }}>
                   <EaStatusPanel eaStatuses={data.eaStatuses} />
                   <RiskSnapshotCard risk={data.risk} account={data.account} />
-                  <ActivityLogCard entries={data.activityLog} />
                 </Stack>
               </Box>
             </Stack>

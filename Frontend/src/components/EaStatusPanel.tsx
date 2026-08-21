@@ -4,8 +4,6 @@ import CardContent from "@mui/material/CardContent";
 import Divider from "@mui/material/Divider";
 import LinearProgress from "@mui/material/LinearProgress";
 import Stack from "@mui/material/Stack";
-import Switch from "@mui/material/Switch";
-import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import type { EaStatus } from "../types/dashboard";
 import { numericSx } from "../theme";
@@ -15,10 +13,10 @@ interface EaStatusPanelProps {
 }
 
 const STATE_LABEL: Record<EaStatus["state"], string> = {
-  active: "● Active",
-  standby: "○ Standby",
-  error: "● Error",
-  not_deployed: "○ ยังไม่ deploy",
+  active: "Active",
+  standby: "Standby",
+  error: "Error",
+  not_deployed: "ยังไม่ deploy",
 };
 
 const STATE_COLOR: Record<EaStatus["state"], string> = {
@@ -33,7 +31,7 @@ export default function EaStatusPanel({ eaStatuses }: EaStatusPanelProps) {
 
   return (
     <Card>
-      <CardContent sx={{ pb: "8px !important" }}>
+      <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.5 } }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
           <Typography variant="subtitle1" fontWeight={700}>
             EA Status
@@ -47,13 +45,14 @@ export default function EaStatusPanel({ eaStatuses }: EaStatusPanelProps) {
           {eaStatuses.map((ea) => {
             const deployed = ea.state !== "not_deployed";
             return (
-              <Box key={ea.id} sx={{ py: 1.5 }}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Box>
+              <Box key={ea.id} sx={{ py: 1.25 }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                  <Box minWidth={0}>
                     <Typography
                       variant="body2"
                       fontWeight={700}
                       color={deployed ? "text.primary" : "text.secondary"}
+                      lineHeight={1.35}
                     >
                       {ea.name}
                     </Typography>
@@ -61,32 +60,69 @@ export default function EaStatusPanel({ eaStatuses }: EaStatusPanelProps) {
                       {ea.symbol} · {ea.timeframe}
                     </Typography>
                   </Box>
-                  <Tooltip title="แสดงสถานะจาก Terminal เท่านั้น — การควบคุมเปิด/ปิด EA ระยะไกลยังไม่รองรับในเวอร์ชันนี้">
-                    <span>
-                      <Switch
-                        size="small"
-                        checked={ea.state === "active" || ea.state === "standby"}
-                        disabled
-                        inputProps={{ "aria-label": `สถานะ ${ea.name}` }}
-                      />
-                    </span>
-                  </Tooltip>
+                  <Stack
+                    direction="row"
+                    alignItems="center"
+                    gap={0.6}
+                    sx={{
+                      flexShrink: 0,
+                      px: 0.9,
+                      py: 0.4,
+                      borderRadius: 99,
+                      bgcolor: "action.hover",
+                    }}
+                  >
+                    <Box
+                      aria-hidden
+                      sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: STATE_COLOR[ea.state] }}
+                    />
+                    <Typography
+                      variant="caption"
+                      fontWeight={700}
+                      sx={{ color: STATE_COLOR[ea.state], lineHeight: 1.2 }}
+                    >
+                      {STATE_LABEL[ea.state]}
+                    </Typography>
+                  </Stack>
                 </Stack>
-
-                <MetaRow label="สถานะ" value={STATE_LABEL[ea.state]} valueColor={STATE_COLOR[ea.state]} />
 
                 {deployed ? (
                   <>
-                    <MetaRow label="Session" value={ea.sessionWindow} />
-                    <MetaRow label="สัญญาณล่าสุด" value={ea.lastSignal} />
-                    <MetaRow label="ไม้วันนี้" value={`${ea.tradesToday} / ${ea.maxTradesPerDay}`} />
+                    <Box
+                      sx={{
+                        display: "grid",
+                        gridTemplateColumns: "minmax(0, 1fr) auto",
+                        gap: 1.5,
+                        mt: 1.25,
+                      }}
+                    >
+                      <Metric label="Session" value={ea.sessionWindow} />
+                      <Metric label="ไม้วันนี้" value={`${ea.tradesToday} / ${ea.maxTradesPerDay}`} align="right" />
+                    </Box>
                     <LinearProgress
                       variant="determinate"
                       value={
                         ea.maxTradesPerDay > 0 ? (ea.tradesToday / ea.maxTradesPerDay) * 100 : 0
                       }
-                      sx={{ mt: 0.5, height: 5, borderRadius: 3 }}
+                      sx={{ mt: 0.75, height: 4, borderRadius: 3 }}
                     />
+                    <Box sx={{ mt: 1.1, p: 1, borderRadius: 1.25, bgcolor: "action.hover" }}>
+                      <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 0.35 }}>
+                        สัญญาณล่าสุด
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          ...numericSx,
+                          display: "block",
+                          color: "text.primary",
+                          lineHeight: 1.5,
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {ea.lastSignal}
+                      </Typography>
+                    </Box>
                   </>
                 ) : (
                   ea.note && (
@@ -115,23 +151,26 @@ export default function EaStatusPanel({ eaStatuses }: EaStatusPanelProps) {
   );
 }
 
-function MetaRow({
+function Metric({
   label,
   value,
-  valueColor,
+  align = "left",
 }: {
   label: string;
   value: string;
-  valueColor?: string;
+  align?: "left" | "right";
 }) {
   return (
-    <Stack direction="row" justifyContent="space-between" sx={{ mt: 1, fontSize: 12.5 }}>
-      <Typography variant="caption" color="text.secondary">
+    <Box minWidth={0} sx={{ textAlign: align }}>
+      <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 0.2 }}>
         {label}
       </Typography>
-      <Typography variant="caption" sx={{ ...numericSx, color: valueColor ?? "text.primary" }}>
+      <Typography
+        variant="caption"
+        sx={{ ...numericSx, display: "block", color: "text.primary", overflowWrap: "anywhere" }}
+      >
         {value}
       </Typography>
-    </Stack>
+    </Box>
   );
 }

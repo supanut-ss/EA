@@ -63,7 +63,13 @@ export default function OpenPositionsCard({
         )}
 
         <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 760 }}>
+          <Table
+            size="small"
+            sx={{
+              minWidth: 880,
+              "& .MuiTableCell-root": { whiteSpace: "nowrap", px: 1 },
+            }}
+          >
             <TableHead>
               <TableRow>
                 <TableCell>EA</TableCell>

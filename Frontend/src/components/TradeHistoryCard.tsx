@@ -3,6 +3,8 @@ import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
+import Collapse from "@mui/material/Collapse";
+import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Table from "@mui/material/Table";
@@ -13,6 +15,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Tabs from "@mui/material/Tabs";
 import Typography from "@mui/material/Typography";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import type { ClosedTrade, Performance } from "../types/dashboard";
 import { numericSx } from "../theme";
 import { formatEaName, formatPrice, formatSide, formatUsd } from "../utils/format";
@@ -51,6 +54,7 @@ export default function TradeHistoryCard({
   brokerToday,
 }: TradeHistoryCardProps) {
   const [range, setRange] = useState(0);
+  const [expanded, setExpanded] = useState(true);
   const stats = performance[RANGES[range].key];
   const maxAgeDays = RANGES[range].maxAgeDays;
   const filtered = trades
@@ -60,28 +64,56 @@ export default function TradeHistoryCard({
   return (
     <Card>
       <CardContent sx={{ pb: "8px !important" }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} mb={0.5}>
           <Typography variant="subtitle1" fontWeight={700}>
             Trade History
           </Typography>
-          <Typography variant="caption" color="text.disabled">
-            Win rate {stats.winRatePct}% · PF {stats.profitFactor} · Expectancy{" "}
-            {formatUsd(stats.expectancy, true)}
-          </Typography>
+          <Stack direction="row" alignItems="center" gap={0.5} minWidth={0}>
+            <Typography
+              variant="caption"
+              color="text.disabled"
+              noWrap
+              sx={{ display: { xs: "none", sm: "block" } }}
+            >
+              Win rate {stats.winRatePct}% · PF {stats.profitFactor} · Expectancy{" "}
+              {formatUsd(stats.expectancy, true)}
+            </Typography>
+            <IconButton
+              size="small"
+              aria-label={`${expanded ? "ย่อ" : "ขยาย"} Trade History`}
+              aria-expanded={expanded}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              <ExpandMoreIcon
+                fontSize="small"
+                sx={{
+                  transform: expanded ? "rotate(180deg)" : "none",
+                  transition: "transform 150ms",
+                }}
+              />
+            </IconButton>
+          </Stack>
         </Stack>
 
-        <Tabs
-          value={range}
-          onChange={(_, v) => setRange(v)}
-          sx={{ minHeight: 36, mb: 1, borderBottom: 1, borderColor: "divider" }}
-        >
-          {RANGES.map((r) => (
-            <Tab key={r.key} label={r.label} sx={{ minHeight: 36, textTransform: "none" }} />
-          ))}
-        </Tabs>
+        <Collapse in={expanded} timeout="auto">
+          <Tabs
+            value={range}
+            onChange={(_, v) => setRange(v)}
+            sx={{ minHeight: 36, mb: 1, borderBottom: 1, borderColor: "divider" }}
+          >
+            {RANGES.map((r) => (
+              <Tab key={r.key} label={r.label} sx={{ minHeight: 36, textTransform: "none" }} />
+            ))}
+          </Tabs>
 
-        <TableContainer sx={{ overflowX: "auto" }}>
-          <Table size="small" sx={{ minWidth: 600 }}>
+          <TableContainer sx={{ overflowX: "auto" }}>
+            <Table
+              size="small"
+              sx={{
+                minWidth: 720,
+                "& .MuiTableCell-root": { whiteSpace: "nowrap", px: 1.25 },
+              }}
+            >
             <TableHead>
               <TableRow>
                 <TableCell>EA</TableCell>
@@ -150,8 +182,9 @@ export default function TradeHistoryCard({
                 ))
               )}
             </TableBody>
-          </Table>
-        </TableContainer>
+            </Table>
+          </TableContainer>
+        </Collapse>
       </CardContent>
     </Card>
   );
