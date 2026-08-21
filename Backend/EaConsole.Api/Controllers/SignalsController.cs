@@ -19,7 +19,7 @@ namespace EaConsole.Api.Controllers;
 //   เดียวกันที่ Program.cs (ขยาย path ให้ครอบคลุม /api/signals ด้วยแล้ว)
 [ApiController]
 [Route("api/signals")]
-public class SignalsController(EaConsoleDbContext db) : ControllerBase
+public class SignalsController(EaConsoleDbContext db, IIngestService ingestService) : ControllerBase
 {
     // 2026-08-14: moved to its own real Live account (Exness-MT5Real8,
     // login 411757774, account_id=2) - was account_id=1 (shared with
