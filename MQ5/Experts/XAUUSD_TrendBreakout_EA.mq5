@@ -31,13 +31,24 @@
 #include <Trade\Trade.mqh>
 
 // This EA's own ingest defaults - matches its real registration in the
-// backend DB (ea_id=1, "Trend Breakout") and the live production host, so
-// a fresh attach no longer needs manual reconfiguration (see
-// EaIngestClient.mqh for how these override the shared localhost fallback -
-// without this, a reset/fresh-attach input would silently point at
-// http://localhost:5008 instead of production).
+// backend DB (ea_id=1, "Trend Breakout") and the live production host.
+// Previously left unset ("untouched" per the EA2 commit that introduced
+// these overrides), which meant a fresh attach silently defaulted to
+// localhost:5008 unless someone remembered to retype the production URL by
+// hand - made explicit here so that footgun can't recur. Heartbeat interval
+// is deliberately different from EA2's/EA3's - see the incident note next
+// to INGEST_DEFAULT_HEARTBEAT_SEC in EaIngestClient.mqh.
 #define INGEST_DEFAULT_EA_ID 1
 #define INGEST_DEFAULT_BASE_URL "https://ea.thaipesleague.com"
+#define INGEST_DEFAULT_HEARTBEAT_SEC 29
+// Not a sensitive secret (shared low-value gate in front of the ingest
+// endpoints, not an account/broker credential) - defaulting it on plus
+// InpIngestEnabled=true (2026-08-21+) means a fresh attach reports to the
+// backend immediately with no manual setup. Must match backend's
+// Ingest:ApiKey (see deploy-single-host.ps1's $IngestApiKey, local-only,
+// git-ignored).
+#define INGEST_DEFAULT_ENABLED true
+#define INGEST_DEFAULT_API_KEY "33be34ac24f13a1131f00b8451c9be4a1e3dbc1a5bfee721fd45f2f8142ede86"
 #include <EaIngestClient.mqh>
 
 CTrade trade;

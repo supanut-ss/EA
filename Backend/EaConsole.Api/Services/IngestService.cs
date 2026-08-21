@@ -12,20 +12,48 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
 {
     public async Task IngestSnapshotAsync(SnapshotIngestRequest request, CancellationToken ct = default)
     {
-        var snapshot = new AccountSnapshot
+        await UpsertDailySnapshotAsync(
+            request.AccountId, request.CapturedAtBroker, request.Balance, request.Equity,
+            request.Margin, request.FreeMargin, request.MarginLevelPct, request.SpreadPoints,
+            EnumDbMaps.ConnectionStateFromDb(request.ConnectionState), ct);
+    }
+
+    // Real incident (2026-08-21): account_snapshots inserted a brand new row
+    // on every heartbeat (every ~10-30s, x3 EAs) and grew to 58k+ rows within
+    // days - nothing on the dashboard reads finer than "latest snapshot per
+    // day" (see SnapshotRetentionService's comment: the equity curve and the
+    // Balance/Equity card both only ever use the latest row), so all that
+    // insert volume was pure overhead that slowed the dashboard down for no
+    // benefit. Upsert the same (account, broker day) row instead - keeps
+    // "latest value wins" semantics identical to before, just without
+    // re-inserting. SnapshotRetentionService still runs to thin the rows
+    // already accumulated the old way and to prune ancient daily rows.
+    public async Task UpsertDailySnapshotAsync(
+        int accountId, DateTime capturedAtBroker, decimal balance, decimal equity,
+        decimal margin, decimal freeMargin, decimal? marginLevelPct, int? spreadPoints,
+        ConnectionState connectionState, CancellationToken ct = default)
+    {
+        var dayStart = capturedAtBroker.Date;
+        var dayEnd = dayStart.AddDays(1);
+
+        var snapshot = await db.AccountSnapshots.FirstOrDefaultAsync(
+            s => s.AccountId == accountId && s.CapturedAtBroker >= dayStart && s.CapturedAtBroker < dayEnd, ct);
+
+        if (snapshot is null)
         {
-            AccountId = request.AccountId,
-            CapturedAtBroker = request.CapturedAtBroker,
-            Balance = request.Balance,
-            Equity = request.Equity,
-            Margin = request.Margin,
-            FreeMargin = request.FreeMargin,
-            MarginLevelPct = request.MarginLevelPct,
-            SpreadPoints = request.SpreadPoints,
-            ConnectionState = EnumDbMaps.ConnectionStateFromDb(request.ConnectionState),
-            CreatedAt = DateTime.UtcNow,
-        };
-        db.AccountSnapshots.Add(snapshot);
+            snapshot = new AccountSnapshot { AccountId = accountId, CreatedAt = DateTime.UtcNow };
+            db.AccountSnapshots.Add(snapshot);
+        }
+
+        snapshot.CapturedAtBroker = capturedAtBroker;
+        snapshot.Balance = balance;
+        snapshot.Equity = equity;
+        snapshot.Margin = margin;
+        snapshot.FreeMargin = freeMargin;
+        snapshot.MarginLevelPct = marginLevelPct;
+        snapshot.SpreadPoints = spreadPoints;
+        snapshot.ConnectionState = connectionState;
+
         await db.SaveChangesAsync(ct);
     }
 

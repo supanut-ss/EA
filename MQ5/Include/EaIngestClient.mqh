@@ -16,12 +16,16 @@
 //|    OpenTrade(), right after a successful trade.Buy()/Sell()  ->   |
 //|                             IngestTrackOpen(...) + IngestTradeOpened(...) |
 //|                                                                    |
-//|  IMPORTANT: `InpIngestEnabled` defaults to false - everything in  |
-//|  this file is a no-op until the user turns it on. Keep it OFF     |
-//|  during Strategy Tester backtests/optimization (WebRequest is not |
-//|  meant for that - it would hit a real server from every one of    |
-//|  the parallel tester agents on every heartbeat/trade, which is    |
-//|  slow, non-deterministic, and pointless for historical data).     |
+//|  IMPORTANT: `InpIngestEnabled` defaults to false for any EA that   |
+//|  doesn't opt in (see INGEST_DEFAULT_ENABLED below) - everything    |
+//|  in this file is a no-op until it's on. EA1/EA2 default it to      |
+//|  true (2026-08-21+) since a fresh attach should just work, but     |
+//|  WebRequest is never meant for Strategy Tester/optimization (it    |
+//|  would hit the real server from every parallel tester agent on    |
+//|  every heartbeat/trade - slow, non-deterministic, and pointless    |
+//|  for historical data) - so IngestEnabled() below forces this off   |
+//|  whenever MQLInfoInteger(MQL_TESTER) is true, regardless of what   |
+//|  the input says. No manual untick-before-backtest step needed.    |
 //|                                                                    |
 //|  MT5 blocks all WebRequest calls by default. Before enabling this |
 //|  in live/demo trading, add the backend host in MT5:               |
@@ -46,15 +50,40 @@
 #ifndef INGEST_DEFAULT_EA_ID
    #define INGEST_DEFAULT_EA_ID 1
 #endif
+// Real incident (2026-08-13 to 08-20): EA1/EA2/EA3 all defaulted to a 10s
+// heartbeat/poll, and since MT5's EventSetTimer() starts counting from
+// whenever each EA happens to be attached/recompiled, the three drifted
+// into firing on the same tick often enough to burst the backend host's
+// MariaDB past its (low, shared-host) max_user_connections - some of those
+// requests got silently dropped with no retry. Two independent changes: (1)
+// slower default (was 10s) since heartbeat freshness doesn't need to be
+// that tight, and (2) a distinct, mutually-prime-ish default per EA so a
+// repeat of the day-one coincidence can't recur - three synchronized clocks
+// only re-align at their LCM, which for prime-ish seconds like these is
+// effectively "never" in practice (see the per-EA #define overrides).
+#ifndef INGEST_DEFAULT_HEARTBEAT_SEC
+   #define INGEST_DEFAULT_HEARTBEAT_SEC 29
+#endif
+// Same override pattern for the enabled flag and API key - EA1/EA2 opt into
+// non-secret production defaults via #define (2026-08-21+); anything that
+// doesn't override stays OFF/blank, same dev-safe fallback as before (keep
+// it that way for any future EA that includes this file without opting in -
+// see the big warning above about WebRequest during Strategy Tester runs).
+#ifndef INGEST_DEFAULT_ENABLED
+   #define INGEST_DEFAULT_ENABLED false
+#endif
+#ifndef INGEST_DEFAULT_API_KEY
+   #define INGEST_DEFAULT_API_KEY ""
+#endif
 
 input group "=== Backend Ingest (EA Console) ==="
-input bool     InpIngestEnabled      = false;                      // Enable sending data to backend (OFF by default - see notes above)
+input bool     InpIngestEnabled      = INGEST_DEFAULT_ENABLED;     // Enable sending data to backend (OFF by default - see notes above)
 input string   InpIngestBaseUrl      = INGEST_DEFAULT_BASE_URL;    // Backend base URL, no trailing slash (see Backend/EaConsole.Api/Properties/launchSettings.json)
 input int      InpIngestAccountId    = 1;                          // AccountId in the backend DB
 input int      InpIngestEaId         = INGEST_DEFAULT_EA_ID;       // EaId in the backend DB (must differ per EA)
-input int      InpIngestHeartbeatSec = 10;                         // Heartbeat interval, seconds
+input int      InpIngestHeartbeatSec = INGEST_DEFAULT_HEARTBEAT_SEC; // Heartbeat interval, seconds (kept distinct per EA on purpose - see comment above)
 input int      InpIngestTimeoutMs    = 5000;                       // WebRequest timeout, ms
-input string   InpIngestApiKey       = "";                         // X-Api-Key header (leave blank if backend's Ingest:ApiKey is unset)
+input string   InpIngestApiKey       = INGEST_DEFAULT_API_KEY;     // X-Api-Key header (leave blank if backend's Ingest:ApiKey is unset)
 
 //--- one open-trade record we remember between "opened" and "closed" events
 struct IngestOpenTradeInfo
@@ -70,6 +99,22 @@ struct IngestOpenTradeInfo
    datetime openTime;
 };
 IngestOpenTradeInfo g_ingestOpenTrades[];
+
+//+------------------------------------------------------------------+
+// Single source of truth for "should we actually send anything" - checks
+// InpIngestEnabled AND forces off inside Strategy Tester/optimization
+// regardless of that input's value. Needed now that EA1/EA2 default
+// InpIngestEnabled=true (2026-08-21+): the old plain-input check relied on
+// remembering to untick it by hand before every backtest/optimization run,
+// and optimization spins up many parallel tester agents that would each
+// hit the real production backend on every heartbeat/trade if that were
+// ever forgotten (see the WebRequest-in-tester warning at the top of this
+// file). MQL_TESTER is true for both a plain backtest and every
+// optimization pass, so one check covers both.
+bool IngestEnabled()
+{
+   return InpIngestEnabled && !(bool)MQLInfoInteger(MQL_TESTER);
+}
 
 //--- IngestSend() only ever Print()s on FAILURE - a fully-working EA and a
 //    silently-misconfigured one (wrong AccountId/EaId, backend down, etc.)
@@ -122,7 +167,7 @@ bool IngestHistoryDealSelectRetry(ulong dealTicket, int maxAttempts = 5, int del
 //+------------------------------------------------------------------+
 bool IngestSend(string method, string path, string jsonBody)
 {
-   if(!InpIngestEnabled) return false;
+   if(!IngestEnabled()) return false;
 
    // Real incident (2026-08-14): InpIngestBaseUrl was set with a trailing
    // slash, producing a literal "//api/..." that this host's web server
@@ -172,6 +217,12 @@ void IngestPrintStartupInfo()
       Print("Ingest: disabled (InpIngestEnabled=false) - nothing will be sent to backend");
       return;
    }
+   if((bool)MQLInfoInteger(MQL_TESTER))
+   {
+      Print("Ingest: InpIngestEnabled=true but running in Strategy Tester/optimization - ",
+            "forcing OFF regardless (never send test/optimization runs to the real backend)");
+      return;
+   }
    Print("Ingest: enabled -> ", InpIngestBaseUrl,
          " (AccountId=", InpIngestAccountId, ", EaId=", InpIngestEaId,
          ", heartbeat every ", InpIngestHeartbeatSec, "s)");
@@ -180,7 +231,7 @@ void IngestPrintStartupInfo()
 //+------------------------------------------------------------------+
 void IngestSendHeartbeat(string symbol)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
 
    double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
    double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -248,7 +299,7 @@ void IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
                         double slAmount, double tpAmount, datetime openTime,
                         double swap, double commission)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
 
    string json = StringFormat(
       "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
@@ -270,7 +321,7 @@ void IngestTradeClosed(ulong ticket, string symbol, string side, double lot,
                         datetime openTime, datetime closeTime,
                         double pnl, double swap, double commission, string closeReason)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
 
    string json = StringFormat(
       "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
@@ -290,7 +341,7 @@ void IngestTradeClosed(ulong ticket, string symbol, string side, double lot,
 //+------------------------------------------------------------------+
 void IngestLog(int eaId, string level, string message)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
 
    string json = StringFormat(
       "{\"accountId\":%d,\"eaId\":%d,\"level\":\"%s\",\"message\":\"%s\",\"eventTimeBroker\":\"%s\"}",
@@ -302,7 +353,7 @@ void IngestLog(int eaId, string level, string message)
 //+------------------------------------------------------------------+
 void IngestSetEaStatus(string state)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
 
    string json = StringFormat("{\"state\":\"%s\"}", state);
    string path = StringFormat("/api/ingest/ea/%d/status", InpIngestEaId);
@@ -364,7 +415,7 @@ bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo)
 //+------------------------------------------------------------------+
 void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicNumber, string symbol)
 {
-   if(!InpIngestEnabled) return;
+   if(!IngestEnabled()) return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
 
    ulong dealTicket = trans.deal;

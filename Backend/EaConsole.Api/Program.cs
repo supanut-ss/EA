@@ -16,8 +16,19 @@ var connectionString = builder.Configuration.GetConnectionString("EaConsole")
 // ต้อง detect ครั้งเดียวตอน startup แล้ว cache ผลไว้ใช้ซ้ำแทน
 var serverVersion = ServerVersion.AutoDetect(connectionString);
 
+// Real incident (2026-08-13 to 08-20): this host's MariaDB rejects new
+// connections once thaipes_sa hits max_user_connections=30 - under bursty
+// concurrent load (EA1/EA2 heartbeats, trade posts, EA3 signals, and
+// dashboard polling all landing near the same 10s tick) that limit gets hit
+// often enough to matter (85k+ Aborted_connects observed on this server).
+// Each rejection used to surface as an unhandled MySqlException -> bare
+// HTTP 500 to the EA, and a POST that never gets retried by the EA client
+// means that trade/log event is gone forever. EnableRetryOnFailure makes
+// EF Core retry the transient connection/command failure itself before
+// giving up, so a momentary connection-limit blip no longer drops data.
 builder.Services.AddDbContext<EaConsoleDbContext>(options =>
-    options.UseMySql(connectionString, serverVersion));
+    options.UseMySql(connectionString, serverVersion, mySqlOptions =>
+        mySqlOptions.EnableRetryOnFailure(maxRetryCount: 4, maxRetryDelay: TimeSpan.FromSeconds(4), errorNumbersToAdd: null)));
 
 builder.Services.AddScoped<IDashboardQueryService, DashboardQueryService>();
 builder.Services.AddScoped<IIngestService, IngestService>();

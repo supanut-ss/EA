@@ -1,6 +1,7 @@
 using EaConsole.Api.Data;
 using EaConsole.Api.Data.Entities;
 using EaConsole.Api.Dtos;
+using EaConsole.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -34,20 +35,16 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
     [HttpPost("pending")]
     public async Task<IActionResult> Pending([FromBody] SignalPendingRequest request, CancellationToken ct)
     {
-        db.AccountSnapshots.Add(new AccountSnapshot
-        {
-            AccountId = AccountId,
-            CapturedAtBroker = DateTime.UtcNow,
-            Balance = request.Balance,
-            Equity = request.Equity,
-            Margin = request.Equity - request.FreeMargin,
-            FreeMargin = request.FreeMargin,
-            MarginLevelPct = null,
-            SpreadPoints = null, // EA3 reports bid/ask as price, not points - not comparable to EA1/EA2's spread
-            ConnectionState = ConnectionState.Connected,
-            CreatedAt = DateTime.UtcNow,
-        });
-        await db.SaveChangesAsync(ct);
+        // Upsert one row per (account, broker day) instead of inserting a
+        // fresh row every poll - see IIngestService.UpsertDailySnapshotAsync's
+        // comment (2026-08-21 account_snapshots growth incident, same fix
+        // applied here since this endpoint doubles as EA3's heartbeat too).
+        await ingestService.UpsertDailySnapshotAsync(
+            AccountId, DateTime.UtcNow, request.Balance, request.Equity,
+            request.Equity - request.FreeMargin, request.FreeMargin,
+            marginLevelPct: null,
+            spreadPoints: null, // EA3 reports bid/ask as price, not points - not comparable to EA1/EA2's spread
+            ConnectionState.Connected, ct);
 
         return Content("[]", "application/json");
     }

@@ -16,7 +16,16 @@ input group "== Webhook Connection Settings =="
 input bool     InpEnableWebhookPolling = true;                 // เปิดใช้งานการดึงสัญญาณการเทรดผ่าน Webhook
 input string   InpBackendURL           = "https://ea.thaipesleague.com"; // ลิงก์ API หลังบ้าน C# (EA Console dashboard - เดิมชี้ ats.thaipesleague.com)
 input string   InpAuthToken            = "33be34ac24f13a1131f00b8451c9be4a1e3dbc1a5bfee721fd45f2f8142ede86"; // ต้องตรงกับ Ingest:ApiKey ของ backend (ส่งเป็น header X-Api-Key ด้วย ดู WebRequest calls ด้านล่าง)
-input int      InpPollInterval         = 10000;                 // รอบเวลาการดึงข้อมูลจากหลังบ้าน (มิลลิวินาที)
+// Real incident (2026-08-13 to 08-20): this, EA1's, and EA2's heartbeat/poll
+// all defaulted to 10s - MT5 timers start counting from whenever each EA
+// gets attached, so the three drifted into firing together often enough to
+// burst past the backend host's (low, shared-host) max_user_connections,
+// silently dropping requests with no retry. 37000 here is deliberately a
+// different, mutually-prime-ish value from EA1's/EA2's 29s/31s so the three
+// can't resynchronize - OnTimer() here only does the webhook poll + this
+// EA's heartbeat snapshot, not the trading strategy itself, so a slower
+// interval doesn't affect entries/exits (see OnTimer() below).
+input int      InpPollInterval         = 37000;                 // รอบเวลาการดึงข้อมูลจากหลังบ้าน (มิลลิวินาที)
 input int      InpSignalDedupDays      = 30;                    // เก็บผล signal ID เพื่อป้องกันเปิดซ้ำข้าม restart
 input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Tester server offset from UTC (for example 2 or 3)
 
