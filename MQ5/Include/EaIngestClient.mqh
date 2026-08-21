@@ -356,8 +356,15 @@ bool IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
 {
    if(!IngestEnabled()) return false;
 
+   // Real incident (2026-08-21): %d expects a 32-bit signed int, but ticket
+   // is ulong (64-bit) and MT5 ticket numbers on this account have grown
+   // past 2^31 (2.1B+) - %d silently wrapped every ticket into a negative
+   // number, which the backend then rejected outright: MySqlException "Out
+   // of range value for column 'mt5_ticket'" (an UNSIGNED column) on every
+   // single OPEN/CLOSE report, both here and in IngestTradeClosed below.
+   // %I64u is MQL5's unsigned-64-bit specifier (borrowed from Win32 printf).
    string json = StringFormat(
-      "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
+      "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
       "\"openPrice\":%.3f,\"closePrice\":null,\"stopLoss\":%.3f,\"takeProfit\":%.3f,"
       "\"currentPrice\":%.3f,\"unrealizedPnl\":%.2f,\"slAmount\":%.2f,\"tpAmount\":%.2f,"
       "\"openTimeBroker\":\"%s\",\"closeTimeBroker\":null,"
@@ -380,8 +387,10 @@ void IngestTradeClosed(ulong ticket, string symbol, string side, double lot,
 {
    if(!IngestEnabled()) return;
 
+   // See IngestTradeOpened's comment - same %d-on-ulong overflow bug fixed
+   // here with %I64u.
    string json = StringFormat(
-      "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
+      "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
       "\"openPrice\":%.3f,\"closePrice\":%.3f,\"stopLoss\":%.3f,\"takeProfit\":%.3f,"
       "\"currentPrice\":%.3f,\"unrealizedPnl\":null,\"slAmount\":%.2f,\"tpAmount\":%.2f,"
       "\"openTimeBroker\":\"%s\",\"closeTimeBroker\":\"%s\","
