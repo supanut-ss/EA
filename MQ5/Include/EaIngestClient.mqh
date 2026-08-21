@@ -97,6 +97,12 @@ struct IngestOpenTradeInfo
    double   tpAmount;
    datetime openTime;
    bool     reportedOpen;
+   // Cached from the real opening deal the first time it's known (MT5 has no
+   // "commission so far" position property - only deals carry it, and this
+   // account's model charges it once on entry) - reused on every later
+   // refresh instead of re-querying history, and instead of sending 0 and
+   // clobbering the real value back to zero (see IngestReportOpenPosition).
+   double   commission;
 };
 IngestOpenTradeInfo g_ingestOpenTrades[];
 
@@ -267,11 +273,13 @@ void IngestTrackOpen(ulong ticket, string side, double lot, double openPrice,
 {
    int index = -1;
    bool reportedOpen = false;
+   double commission = 0;
    for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
    {
       if(g_ingestOpenTrades[i].ticket != ticket) continue;
       index = i;
       reportedOpen = g_ingestOpenTrades[i].reportedOpen;
+      commission   = g_ingestOpenTrades[i].commission;
       break;
    }
 
@@ -291,6 +299,7 @@ void IngestTrackOpen(ulong ticket, string side, double lot, double openPrice,
    g_ingestOpenTrades[index].tpAmount     = tpAmount;
    g_ingestOpenTrades[index].openTime     = openTime;
    g_ingestOpenTrades[index].reportedOpen = reportedOpen;
+   g_ingestOpenTrades[index].commission   = commission;
 }
 
 //+------------------------------------------------------------------+
@@ -303,14 +312,24 @@ bool IngestOpenWasReported(ulong ticket)
 }
 
 //+------------------------------------------------------------------+
-void IngestMarkOpenReported(ulong ticket)
+void IngestMarkOpenReported(ulong ticket, double commission)
 {
    for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
    {
       if(g_ingestOpenTrades[i].ticket != ticket) continue;
       g_ingestOpenTrades[i].reportedOpen = true;
+      g_ingestOpenTrades[i].commission   = commission;
       return;
    }
+}
+
+//+------------------------------------------------------------------+
+double IngestGetCachedCommission(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
+      if(g_ingestOpenTrades[i].ticket == ticket)
+         return g_ingestOpenTrades[i].commission;
+   return 0;
 }
 
 //+------------------------------------------------------------------+
@@ -332,6 +351,7 @@ bool IngestPopOpen(ulong ticket, IngestOpenTradeInfo &outInfo)
 bool IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
                         double openPrice, double sl, double tp,
                         double slAmount, double tpAmount, datetime openTime,
+                        double currentPrice, double unrealizedPnl,
                         double swap, double commission)
 {
    if(!IngestEnabled()) return false;
@@ -339,17 +359,15 @@ bool IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
    string json = StringFormat(
       "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
       "\"openPrice\":%.3f,\"closePrice\":null,\"stopLoss\":%.3f,\"takeProfit\":%.3f,"
-      "\"currentPrice\":%.3f,\"unrealizedPnl\":0,\"slAmount\":%.2f,\"tpAmount\":%.2f,"
+      "\"currentPrice\":%.3f,\"unrealizedPnl\":%.2f,\"slAmount\":%.2f,\"tpAmount\":%.2f,"
       "\"openTimeBroker\":\"%s\",\"closeTimeBroker\":null,"
       "\"status\":\"OPEN\",\"pnl\":null,\"swap\":%.2f,\"commission\":%.2f,\"closeReason\":null}",
       InpIngestAccountId, InpIngestEaId, ticket, symbol, side, lot,
-      openPrice, sl, tp, openPrice, slAmount, tpAmount, IngestIsoTime(openTime), swap, commission);
+      openPrice, sl, tp, currentPrice, unrealizedPnl, slAmount, tpAmount,
+      IngestIsoTime(openTime), swap, commission);
 
    if(IngestSend("POST", "/api/ingest/trade", json))
-   {
-      Print("Ingest: trade #", ticket, " reported as OPEN");
       return true;
-   }
    return false;
 }
 
@@ -461,7 +479,7 @@ bool IngestSelectPositionByIdentifier(ulong positionId, ulong magicNumber, strin
 
 //+------------------------------------------------------------------+
 bool IngestBuildOpenInfoFromPosition(ulong positionId, ulong magicNumber, string symbol,
-                                     IngestOpenTradeInfo &outInfo)
+                                     IngestOpenTradeInfo &outInfo, double &currentPrice, double &unrealizedPnl, double &swap)
 {
    if(!IngestSelectPositionByIdentifier(positionId, magicNumber, symbol)) return false;
 
@@ -478,6 +496,9 @@ bool IngestBuildOpenInfoFromPosition(ulong positionId, ulong magicNumber, string
    outInfo.tpAmount     = 0;
    outInfo.openTime     = (datetime)PositionGetInteger(POSITION_TIME);
    outInfo.reportedOpen = IngestOpenWasReported(positionId);
+   currentPrice         = PositionGetDouble(POSITION_PRICE_CURRENT);
+   unrealizedPnl        = PositionGetDouble(POSITION_PROFIT);
+   swap                 = PositionGetDouble(POSITION_SWAP);
 
    if(outInfo.sl > 0 &&
       !OrderCalcProfit(orderType, symbol, outInfo.lot, outInfo.openPrice, outInfo.sl, outInfo.slAmount))
@@ -489,50 +510,67 @@ bool IngestBuildOpenInfoFromPosition(ulong positionId, ulong magicNumber, string
 }
 
 //+------------------------------------------------------------------+
-// Report an MT5-confirmed live position. This is deliberately driven by
-// TRADE_TRANSACTION_DEAL_ADD and also called by the timer reconciliation.
-// A successful trade.Buy()/Sell() can return before ResultDeal()/history is
-// ready; relying on that immediate return path caused real open positions to
-// be absent from the dashboard while heartbeat/log requests still worked.
+// Report (first time) or refresh (every call after) an MT5-confirmed live
+// position. Driven by TRADE_TRANSACTION_DEAL_ADD for the fast/accurate path
+// AND by the timer reconciliation every heartbeat - deliberately does NOT
+// skip once already reported (2026-08-21+: the earlier version did, which
+// meant a position's currentPrice/unrealizedPnl on the dashboard froze at
+// whatever they were at the very first report and never moved again for the
+// rest of the trade's life, even though the report itself was cheap and the
+// backend upserts by ticket anyway). commission is the one field MT5 can't
+// re-derive live from an open position (only deals carry it, not positions) -
+// cache it from the real opening deal the first time it's known and reuse it
+// on every later refresh instead of re-sending 0 and clobbering the real
+// value back to zero.
 bool IngestReportOpenPosition(ulong positionId, ulong magicNumber, string symbol, ulong openingDealTicket = 0)
 {
-   if(IngestOpenWasReported(positionId)) return true;
+   bool firstReport = !IngestOpenWasReported(positionId);
 
    IngestOpenTradeInfo info;
-   if(!IngestBuildOpenInfoFromPosition(positionId, magicNumber, symbol, info))
+   double currentPrice = 0, unrealizedPnl = 0, swap = 0;
+   if(!IngestBuildOpenInfoFromPosition(positionId, magicNumber, symbol, info, currentPrice, unrealizedPnl, swap))
    {
-      if(!IngestReconstructOpenInfo(positionId, info))
+      if(firstReport)
       {
-         Print("Ingest: WARNING - position #", positionId,
-               " opened but live position/history details are unavailable - OPEN report deferred to timer");
-         return false;
+         // Position already closed by the time we got here, or history/live
+         // state briefly unavailable - only worth the reconstruction fallback
+         // (0/unset SL/TP) for a first report; a refresh with nothing new to
+         // say can just wait for the next heartbeat.
+         if(!IngestReconstructOpenInfo(positionId, info))
+         {
+            Print("Ingest: WARNING - position #", positionId,
+                  " opened but live position/history details are unavailable - OPEN report deferred to timer");
+            return false;
+         }
+         currentPrice = info.openPrice;
+         unrealizedPnl = 0;
+         swap = 0;
       }
+      else return false;
    }
 
    IngestTrackOpen(info.ticket, info.side, info.lot, info.openPrice, info.sl, info.tp,
                    info.slAmount, info.tpAmount, info.openTime);
 
-   double swap = 0;
-   double commission = 0;
+   double commission = IngestGetCachedCommission(positionId);
    if(openingDealTicket != 0 && HistoryDealSelect(openingDealTicket))
-   {
-      swap = HistoryDealGetDouble(openingDealTicket, DEAL_SWAP);
       commission = HistoryDealGetDouble(openingDealTicket, DEAL_COMMISSION);
-   }
 
    if(!IngestTradeOpened(info.ticket, symbol, info.side, info.lot, info.openPrice,
-                         info.sl, info.tp, info.slAmount, info.tpAmount,
-                         info.openTime, swap, commission))
+                         info.sl, info.tp, info.slAmount, info.tpAmount, info.openTime,
+                         currentPrice, unrealizedPnl, swap, commission))
       return false;
 
-   IngestMarkOpenReported(positionId);
+   if(firstReport) Print("Ingest: trade #", positionId, " reported as OPEN");
+   IngestMarkOpenReported(positionId, commission);
    return true;
 }
 
 //+------------------------------------------------------------------+
-// Self-heal missed OPEN events and republish positions after an EA/terminal
-// restart. Successful reports are remembered, so normal heartbeats do not
-// keep POSTing the same open position.
+// Refreshes currentPrice/unrealizedPnl/SL/TP for every currently-open
+// position of this EA on every heartbeat tick (see IngestReportOpenPosition's
+// comment), and self-heals a missed OPEN report or a republish after an
+// EA/terminal restart in the same pass.
 void IngestSyncOpenPositions(ulong magicNumber, string symbol)
 {
    if(!IngestEnabled()) return;
