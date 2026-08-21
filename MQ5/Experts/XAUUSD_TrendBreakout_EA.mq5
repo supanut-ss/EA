@@ -154,6 +154,7 @@ int OnInit()
    EventSetTimer(InpIngestHeartbeatSec);
    IngestPrintStartupInfo();
    IngestSetEaStatus("active");
+   IngestSyncOpenPositions(InpMagicNumber, symbolName);
 
    return(INIT_SUCCEEDED);
 }
@@ -174,6 +175,7 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
    IngestSendHeartbeat(symbolName);
+   IngestSyncOpenPositions(InpMagicNumber, symbolName);
 }
 
 //+------------------------------------------------------------------+
@@ -438,25 +440,6 @@ void OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp)
    {
       tradesToday++;
       Print("Trade opened: ", EnumToString(type), " Lots=", InpLotSize, " SL=", sl, " TP=", tp);
-
-      ulong dealTicket = trade.ResultDeal();
-      if(IngestHistoryDealSelectRetry(dealTicket))
-      {
-         ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-         double openPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-         datetime openTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
-         double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
-         double commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
-         string side = (type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
-
-         double slAmount = 0, tpAmount = 0;
-         bool slCalcOk = OrderCalcProfit(type, symbolName, InpLotSize, openPrice, sl, slAmount);
-         bool tpCalcOk = OrderCalcProfit(type, symbolName, InpLotSize, openPrice, tp, tpAmount);
-
-         IngestTrackOpen(positionId, side, InpLotSize, openPrice, sl, tp, slAmount, tpAmount, openTime);
-         IngestTradeOpened(positionId, symbolName, side, InpLotSize, openPrice, sl, tp,
-                            slAmount, tpAmount, openTime, swap, commission);
-      }
    }
    else
    {

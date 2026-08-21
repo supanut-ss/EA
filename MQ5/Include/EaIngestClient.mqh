@@ -11,10 +11,9 @@
 //|    OnDeinit()            -> EventKillTimer();                     |
 //|                             IngestSetEaStatus("standby");         |
 //|    OnTimer()             -> IngestSendHeartbeat(symbolName);      |
+//|                             IngestSyncOpenPositions(...);         |
 //|    OnTradeTransaction()  -> IngestHandleTradeTransaction(trans,   |
 //|                             InpMagicNumber, symbolName);          |
-//|    OpenTrade(), right after a successful trade.Buy()/Sell()  ->   |
-//|                             IngestTrackOpen(...) + IngestTradeOpened(...) |
 //|                                                                    |
 //|  IMPORTANT: `InpIngestEnabled` defaults to false for any EA that   |
 //|  doesn't opt in (see INGEST_DEFAULT_ENABLED below) - everything    |
@@ -97,6 +96,7 @@ struct IngestOpenTradeInfo
    double   slAmount;
    double   tpAmount;
    datetime openTime;
+   bool     reportedOpen;
 };
 IngestOpenTradeInfo g_ingestOpenTrades[];
 
@@ -265,17 +265,52 @@ void IngestSendHeartbeat(string symbol)
 void IngestTrackOpen(ulong ticket, string side, double lot, double openPrice,
                       double sl, double tp, double slAmount, double tpAmount, datetime openTime)
 {
-   int n = ArraySize(g_ingestOpenTrades);
-   ArrayResize(g_ingestOpenTrades, n + 1);
-   g_ingestOpenTrades[n].ticket    = ticket;
-   g_ingestOpenTrades[n].side      = side;
-   g_ingestOpenTrades[n].lot       = lot;
-   g_ingestOpenTrades[n].openPrice = openPrice;
-   g_ingestOpenTrades[n].sl        = sl;
-   g_ingestOpenTrades[n].tp        = tp;
-   g_ingestOpenTrades[n].slAmount  = slAmount;
-   g_ingestOpenTrades[n].tpAmount  = tpAmount;
-   g_ingestOpenTrades[n].openTime  = openTime;
+   int index = -1;
+   bool reportedOpen = false;
+   for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
+   {
+      if(g_ingestOpenTrades[i].ticket != ticket) continue;
+      index = i;
+      reportedOpen = g_ingestOpenTrades[i].reportedOpen;
+      break;
+   }
+
+   if(index < 0)
+   {
+      index = ArraySize(g_ingestOpenTrades);
+      ArrayResize(g_ingestOpenTrades, index + 1);
+   }
+
+   g_ingestOpenTrades[index].ticket       = ticket;
+   g_ingestOpenTrades[index].side         = side;
+   g_ingestOpenTrades[index].lot          = lot;
+   g_ingestOpenTrades[index].openPrice    = openPrice;
+   g_ingestOpenTrades[index].sl           = sl;
+   g_ingestOpenTrades[index].tp           = tp;
+   g_ingestOpenTrades[index].slAmount     = slAmount;
+   g_ingestOpenTrades[index].tpAmount     = tpAmount;
+   g_ingestOpenTrades[index].openTime     = openTime;
+   g_ingestOpenTrades[index].reportedOpen = reportedOpen;
+}
+
+//+------------------------------------------------------------------+
+bool IngestOpenWasReported(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
+      if(g_ingestOpenTrades[i].ticket == ticket)
+         return g_ingestOpenTrades[i].reportedOpen;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+void IngestMarkOpenReported(ulong ticket)
+{
+   for(int i = 0; i < ArraySize(g_ingestOpenTrades); i++)
+   {
+      if(g_ingestOpenTrades[i].ticket != ticket) continue;
+      g_ingestOpenTrades[i].reportedOpen = true;
+      return;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -294,12 +329,12 @@ bool IngestPopOpen(ulong ticket, IngestOpenTradeInfo &outInfo)
 }
 
 //+------------------------------------------------------------------+
-void IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
+bool IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
                         double openPrice, double sl, double tp,
                         double slAmount, double tpAmount, datetime openTime,
                         double swap, double commission)
 {
-   if(!IngestEnabled()) return;
+   if(!IngestEnabled()) return false;
 
    string json = StringFormat(
       "{\"accountId\":%d,\"eaId\":%d,\"mt5Ticket\":%d,\"symbol\":\"%s\",\"side\":\"%s\",\"lot\":%.2f,"
@@ -311,7 +346,11 @@ void IngestTradeOpened(ulong ticket, string symbol, string side, double lot,
       openPrice, sl, tp, openPrice, slAmount, tpAmount, IngestIsoTime(openTime), swap, commission);
 
    if(IngestSend("POST", "/api/ingest/trade", json))
+   {
       Print("Ingest: trade #", ticket, " reported as OPEN");
+      return true;
+   }
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -399,19 +438,122 @@ bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo)
       outInfo.slAmount  = 0;
       outInfo.tpAmount  = 0;
       outInfo.openTime  = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+      outInfo.reportedOpen = false;
       return true;
    }
    return false;
 }
 
 //+------------------------------------------------------------------+
-// Call from the including EA's OnTradeTransaction(). Detects the CLOSE
-// side only (opens are sent directly from OpenTrade(), which already
-// has all the fields on hand) - matches the closed deal back to the
-// IngestTrackOpen() record by position id, so this only needs one
-// history lookup (the closing deal itself), not a second scan for the
-// original opening deal. Falls back to IngestReconstructOpenInfo() when
-// there's no in-memory record (see that function's comment).
+bool IngestSelectPositionByIdentifier(ulong positionId, ulong magicNumber, string symbol)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong positionTicket = PositionGetTicket(i); // also selects the position
+      if(positionTicket == 0) continue;
+      if((ulong)PositionGetInteger(POSITION_IDENTIFIER) != positionId) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool IngestBuildOpenInfoFromPosition(ulong positionId, ulong magicNumber, string symbol,
+                                     IngestOpenTradeInfo &outInfo)
+{
+   if(!IngestSelectPositionByIdentifier(positionId, magicNumber, symbol)) return false;
+
+   ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   ENUM_ORDER_TYPE orderType = (positionType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+
+   outInfo.ticket       = positionId;
+   outInfo.side         = (positionType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+   outInfo.lot          = PositionGetDouble(POSITION_VOLUME);
+   outInfo.openPrice    = PositionGetDouble(POSITION_PRICE_OPEN);
+   outInfo.sl           = PositionGetDouble(POSITION_SL);
+   outInfo.tp           = PositionGetDouble(POSITION_TP);
+   outInfo.slAmount     = 0;
+   outInfo.tpAmount     = 0;
+   outInfo.openTime     = (datetime)PositionGetInteger(POSITION_TIME);
+   outInfo.reportedOpen = IngestOpenWasReported(positionId);
+
+   if(outInfo.sl > 0 &&
+      !OrderCalcProfit(orderType, symbol, outInfo.lot, outInfo.openPrice, outInfo.sl, outInfo.slAmount))
+      outInfo.slAmount = 0;
+   if(outInfo.tp > 0 &&
+      !OrderCalcProfit(orderType, symbol, outInfo.lot, outInfo.openPrice, outInfo.tp, outInfo.tpAmount))
+      outInfo.tpAmount = 0;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+// Report an MT5-confirmed live position. This is deliberately driven by
+// TRADE_TRANSACTION_DEAL_ADD and also called by the timer reconciliation.
+// A successful trade.Buy()/Sell() can return before ResultDeal()/history is
+// ready; relying on that immediate return path caused real open positions to
+// be absent from the dashboard while heartbeat/log requests still worked.
+bool IngestReportOpenPosition(ulong positionId, ulong magicNumber, string symbol, ulong openingDealTicket = 0)
+{
+   if(IngestOpenWasReported(positionId)) return true;
+
+   IngestOpenTradeInfo info;
+   if(!IngestBuildOpenInfoFromPosition(positionId, magicNumber, symbol, info))
+   {
+      if(!IngestReconstructOpenInfo(positionId, info))
+      {
+         Print("Ingest: WARNING - position #", positionId,
+               " opened but live position/history details are unavailable - OPEN report deferred to timer");
+         return false;
+      }
+   }
+
+   IngestTrackOpen(info.ticket, info.side, info.lot, info.openPrice, info.sl, info.tp,
+                   info.slAmount, info.tpAmount, info.openTime);
+
+   double swap = 0;
+   double commission = 0;
+   if(openingDealTicket != 0 && HistoryDealSelect(openingDealTicket))
+   {
+      swap = HistoryDealGetDouble(openingDealTicket, DEAL_SWAP);
+      commission = HistoryDealGetDouble(openingDealTicket, DEAL_COMMISSION);
+   }
+
+   if(!IngestTradeOpened(info.ticket, symbol, info.side, info.lot, info.openPrice,
+                         info.sl, info.tp, info.slAmount, info.tpAmount,
+                         info.openTime, swap, commission))
+      return false;
+
+   IngestMarkOpenReported(positionId);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+// Self-heal missed OPEN events and republish positions after an EA/terminal
+// restart. Successful reports are remembered, so normal heartbeats do not
+// keep POSTing the same open position.
+void IngestSyncOpenPositions(ulong magicNumber, string symbol)
+{
+   if(!IngestEnabled()) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong positionTicket = PositionGetTicket(i); // also selects the position
+      if(positionTicket == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+
+      ulong positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      IngestReportOpenPosition(positionId, magicNumber, symbol);
+   }
+}
+
+//+------------------------------------------------------------------+
+// Call from the including EA's OnTradeTransaction(). OPEN is reported from
+// MT5's confirmed entry deal; CLOSE is matched back to the tracked position.
+// The timer reconciliation above is the retry path for an OPEN request that
+// failed or for a transaction event missed during restart.
 //+------------------------------------------------------------------+
 void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicNumber, string symbol)
 {
@@ -424,9 +566,15 @@ void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicN
    if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != magicNumber) return;
 
    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
-
    ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+
+   if(entry == DEAL_ENTRY_IN)
+   {
+      IngestReportOpenPosition(positionId, magicNumber, symbol, dealTicket);
+      return;
+   }
+
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
 
    IngestOpenTradeInfo info;
    if(!IngestPopOpen(positionId, info))
