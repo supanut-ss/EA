@@ -444,7 +444,7 @@ void IngestSetEaStatus(string state)
 // they come back as 0 ("unset") only in this fallback path - still far
 // better than dropping the closed trade entirely.
 //+------------------------------------------------------------------+
-bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo)
+bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo, ulong &outOpenMagic)
 {
    if(!HistorySelectByPosition(positionId)) return false;
 
@@ -466,6 +466,7 @@ bool IngestReconstructOpenInfo(ulong positionId, IngestOpenTradeInfo &outInfo)
       outInfo.tpAmount  = 0;
       outInfo.openTime  = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
       outInfo.reportedOpen = false;
+      outOpenMagic      = (ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
       return true;
    }
    return false;
@@ -544,8 +545,12 @@ bool IngestReportOpenPosition(ulong positionId, ulong magicNumber, string symbol
          // Position already closed by the time we got here, or history/live
          // state briefly unavailable - only worth the reconstruction fallback
          // (0/unset SL/TP) for a first report; a refresh with nothing new to
-         // say can just wait for the next heartbeat.
-         if(!IngestReconstructOpenInfo(positionId, info))
+         // say can just wait for the next heartbeat. The reconstructed magic
+         // isn't needed here - ownership was already established by the
+         // magicNumber/symbol filter in IngestSelectPositionByIdentifier
+         // before this fallback is ever reached.
+         ulong unusedMagic = 0;
+         if(!IngestReconstructOpenInfo(positionId, info, unusedMagic))
          {
             Print("Ingest: WARNING - position #", positionId,
                   " opened but live position/history details are unavailable - OPEN report deferred to timer");
@@ -598,9 +603,30 @@ void IngestSyncOpenPositions(ulong magicNumber, string symbol)
 
 //+------------------------------------------------------------------+
 // Call from the including EA's OnTradeTransaction(). OPEN is reported from
-// MT5's confirmed entry deal; CLOSE is matched back to the tracked position.
-// The timer reconciliation above is the retry path for an OPEN request that
-// failed or for a transaction event missed during restart.
+// MT5's confirmed entry deal (via IngestReportOpenPosition); CLOSE is
+// matched back to the tracked position by position id, so it only needs
+// one history lookup (the closing deal itself), not a second scan for the
+// original opening deal. Falls back to IngestReconstructOpenInfo() when
+// there's no in-memory record (see that function's comment). The timer
+// reconciliation (IngestSyncOpenPositions) above is the retry path for an
+// OPEN request that failed or for a transaction event missed during
+// restart.
+//
+// Real incident (2026-08-24): positions closed manually from the MT5
+// terminal (or mobile/web) stayed "OPEN" forever on the dashboard even
+// though they were flat in the terminal. Root cause: this used to reject
+// the transaction up front if the CLOSING deal's magic number didn't
+// match InpMagicNumber - but MT5 stamps a manually-closed position's
+// closing deal with magic 0 (it's placed by the client/terminal, not the
+// EA), regardless of what magic the position was opened with. So every
+// manual close was silently dropped before it ever reached IngestPopOpen()
+// below, which is the check that actually proves the position is ours.
+// Fix: don't gate on the closing deal's magic at all - a position found
+// in our own in-memory open-trade list is provably ours no matter who
+// closed it. The magic check now only runs as a fallback, against the
+// OPENING deal (which is reliably stamped by whoever opened the
+// position), to avoid misattributing another same-symbol EA's position
+// when reconstructing from history for an untracked ticket.
 //+------------------------------------------------------------------+
 void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicNumber, string symbol)
 {
@@ -610,7 +636,6 @@ void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicN
    ulong dealTicket = trans.deal;
    if(!IngestHistoryDealSelectRetry(dealTicket)) return;
    if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != symbol) return;
-   if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != magicNumber) return;
 
    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
    ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
@@ -626,12 +651,14 @@ void IngestHandleTradeTransaction(const MqlTradeTransaction &trans, ulong magicN
    IngestOpenTradeInfo info;
    if(!IngestPopOpen(positionId, info))
    {
-      if(!IngestReconstructOpenInfo(positionId, info))
+      ulong openMagic = 0;
+      if(!IngestReconstructOpenInfo(positionId, info, openMagic))
       {
          Print("Ingest: WARNING - position #", positionId, " closed but no open record found (not tracked, and not in deal history either) - close NOT reported");
          return;
       }
-      Print("Ingest: position #", positionId, " had no in-memory open record (EA restarted mid-trade?) - reconstructed from deal history to report the close (SL/TP will show as 0/unset)");
+      if(openMagic != magicNumber) return; // opened by a different EA/magic on this symbol - not ours, nothing to report
+      Print("Ingest: position #", positionId, " had no in-memory open record (EA restarted mid-trade, or closed manually) - reconstructed from deal history to report the close (SL/TP will show as 0/unset)");
    }
 
    double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
