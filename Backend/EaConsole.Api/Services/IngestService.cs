@@ -65,6 +65,22 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
         var trade = await db.Trades.FirstOrDefaultAsync(
             t => t.AccountId == request.AccountId && t.Mt5Ticket == request.Mt5Ticket, ct);
 
+        // Dashboard contract: retain only trades whose lifecycle is managed
+        // entirely by an EA. A manual close is authoritative proof that this
+        // trade does not belong in EA performance/history. Remove an existing
+        // OPEN row instead of converting it to CLOSED, and ignore a standalone
+        // manual-close report that has no row to remove.
+        if (string.Equals(request.Status, "CLOSED", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(request.CloseReason, "MANUAL", StringComparison.OrdinalIgnoreCase))
+        {
+            if (trade is not null)
+            {
+                db.Trades.Remove(trade);
+                await db.SaveChangesAsync(ct);
+            }
+            return;
+        }
+
         if (trade is null)
         {
             trade = new Trade
