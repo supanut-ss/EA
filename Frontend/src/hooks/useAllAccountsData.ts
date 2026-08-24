@@ -16,6 +16,16 @@ interface UseAllAccountsDataResult {
   listError: string | null;
 }
 
+class DashboardFetchError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "DashboardFetchError";
+  }
+}
+
 async function fetchAccountList(): Promise<AccountListItem[]> {
   const res = await fetch("/api/dashboard/accounts");
   if (!res.ok) throw new Error(`โหลดรายชื่อบัญชีไม่สำเร็จ (HTTP ${res.status})`);
@@ -25,8 +35,10 @@ async function fetchAccountList(): Promise<AccountListItem[]> {
 async function fetchSnapshot(accountId: number): Promise<DashboardSnapshot> {
   const res = await fetch(`/api/dashboard/snapshot?accountId=${accountId}`);
   if (!res.ok) {
-    if (res.status === 404) throw new Error("ยังไม่มีข้อมูล — รอ EA ยิง heartbeat เข้ามาก่อน");
-    throw new Error(`โหลดข้อมูลไม่สำเร็จ (HTTP ${res.status})`);
+    if (res.status === 404) {
+      throw new DashboardFetchError("ยังไม่มีข้อมูล — รอ EA ยิง heartbeat เข้ามาก่อน", res.status);
+    }
+    throw new DashboardFetchError(`โหลดข้อมูลไม่สำเร็จ (HTTP ${res.status})`, res.status);
   }
   return res.json();
 }
@@ -54,10 +66,16 @@ export function useAllAccountsData(): UseAllAccountsDataResult {
         [accountId]: { data: snapshot, error: null, isLoading: false },
       }));
     } catch (e) {
+      // A 404 means the account currently has no snapshot (for example,
+      // immediately after demo data is cleared). Keeping the previous
+      // snapshot in this case leaves deleted trades visibly stuck in Trade
+      // History forever until another heartbeat arrives. Preserve stale data
+      // only for transient request failures; authoritative "no data" clears it.
+      const clearStaleData = e instanceof DashboardFetchError && e.status === 404;
       setByAccountId((prev) => ({
         ...prev,
         [accountId]: {
-          data: prev[accountId]?.data ?? null, // เก็บข้อมูลเก่าไว้โชว์ต่อ แม้ poll รอบนี้จะพลาด
+          data: clearStaleData ? null : (prev[accountId]?.data ?? null),
           error: e instanceof Error ? e.message : "โหลดข้อมูลไม่สำเร็จ",
           isLoading: false,
         },
