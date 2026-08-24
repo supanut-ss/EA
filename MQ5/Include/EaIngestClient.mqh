@@ -534,6 +534,24 @@ bool IngestBuildOpenInfoFromPosition(ulong positionId, ulong magicNumber, string
 // value back to zero.
 bool IngestReportOpenPosition(ulong positionId, ulong magicNumber, string symbol, ulong openingDealTicket = 0)
 {
+   // The transaction path is also invoked for manual DEAL_ENTRY_IN deals on
+   // the same symbol. Those deals carry magic 0 and must not be attributed
+   // to whichever EA happened to receive the terminal event. Timer-driven
+   // reconciliation already filters POSITION_MAGIC before calling here;
+   // validate DEAL_MAGIC explicitly for the transaction-driven path.
+   if(openingDealTicket != 0)
+   {
+      if(!IngestHistoryDealSelectRetry(openingDealTicket)) return false;
+      ulong openingMagic = (ulong)HistoryDealGetInteger(openingDealTicket, DEAL_MAGIC);
+      if(openingMagic != magicNumber)
+      {
+         Print("Ingest: position #", positionId,
+               " OPEN ignored - opening deal magic ", openingMagic,
+               " does not match EA magic ", magicNumber);
+         return false;
+      }
+   }
+
    bool firstReport = !IngestOpenWasReported(positionId);
 
    IngestOpenTradeInfo info;
