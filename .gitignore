@@ -62,6 +62,9 @@ MQ5/Backtest/*.pass
 **/.claude/settings.local.json
 **/.claude/scheduled_tasks.lock
 
+# ---------- Local scratch ----------
+.scratch-dbfix/
+
 # ---------- Editor / OS ----------
 .vscode/
 .idea/
