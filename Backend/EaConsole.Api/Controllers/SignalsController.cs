@@ -16,7 +16,9 @@ namespace EaConsole.Api.Controllers;
 //   ตั้งเองแล้ว เหมือนที่ EA1/EA2 มี InpIngestAccountId) — build เก่าที่ยังไม่ส่ง
 //   field นี้มาจะ fallback ไป DefaultAccountId=2 (Exness-MT5Real8 login
 //   411757774, บัญชี Live แยกจาก EA1/EA2) เหมือนเดิมทุกประการ
-// - eaId คงที่ที่ EA3_ID (ต้องมีแถวใน eas table รอไว้แล้ว ea_id=3, magic=88188)
+// - eaId มาจาก payload เช่นกัน (fallback = DefaultEa3Id) เพราะ 1 แถวใน eas
+//   ผูกกับบัญชีเดียว ย้ายบัญชีจึงต้องเปลี่ยน ea_id ตามด้วย ไม่งั้น dashboard
+//   ที่ list EA ตาม account แล้วกรองเทรดด้วย ea_id ของบัญชีนั้นจะมองไม่เห็นเลย
 // - ไม่มี authentication แบบเดียวกับ IngestController — ใช้ Ingest:ApiKey gate
 //   เดียวกันที่ Program.cs (ขยาย path ให้ครอบคลุม /api/signals ด้วยแล้ว)
 [ApiController]
@@ -34,7 +36,7 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
     // demo account can report as itself instead of overwriting this live
     // account's snapshot and filing its demo trades against it.
     private const int DefaultAccountId = 2;
-    private const int Ea3Id = 3;
+    private const int DefaultEa3Id = 3;
 
     // EA3 polls this every InpPollInterval ms (default 10s) with account state.
     // We have no remote signal dispatcher, so this doubles as EA3's heartbeat:
@@ -82,7 +84,7 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
             trade = new Trade
             {
                 AccountId = accountId,
-                EaId = Ea3Id,
+                EaId = request.EaId ?? DefaultEa3Id,
                 Mt5Ticket = ticket,
                 OpenTimeBroker = now, // EA3 does not send a broker open time; receipt time is the best we have
                 CreatedAt = now,
@@ -129,7 +131,7 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
         db.ActivityLog.Add(new ActivityLogEntry
         {
             AccountId = request.AccountId ?? DefaultAccountId,
-            EaId = Ea3Id,
+            EaId = request.EaId ?? DefaultEa3Id,
             Level = ActivityLevel.Info,
             Message = $"Webhook signal {request.Id} status={request.Status} ticket={request.Ticket} profit={request.Profit}",
             EventTimeBroker = DateTime.UtcNow,
