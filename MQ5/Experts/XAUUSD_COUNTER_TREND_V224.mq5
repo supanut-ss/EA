@@ -3108,26 +3108,103 @@ void ExecuteSell(string id,string sym,double lot,double sl,double tp)
    }
 }
 
+bool TryResolveOwnedClosePosition(const string sym,const ulong requested_ticket,
+                                  ulong &resolved_ticket,ulong &position_identifier,
+                                  string &reject_reason)
+{
+   resolved_ticket=0;
+   position_identifier=0;
+   reject_reason="";
+
+   if(requested_ticket>0)
+   {
+      if(!PositionSelectByTicket(requested_ticket))
+      {
+         reject_reason="POSITION_NOT_FOUND";
+         return false;
+      }
+      if(PositionGetString(POSITION_SYMBOL)!=sym)
+      {
+         reject_reason="SYMBOL_MISMATCH";
+         return false;
+      }
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+      {
+         reject_reason="MAGIC_MISMATCH";
+         return false;
+      }
+
+      resolved_ticket=requested_ticket;
+      position_identifier=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      return true;
+   }
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong candidate_ticket=PositionGetTicket(i);
+      if(candidate_ticket==0 || !PositionSelectByTicket(candidate_ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=sym
+         || PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+
+      if(resolved_ticket>0)
+      {
+         resolved_ticket=0;
+         position_identifier=0;
+         reject_reason="AMBIGUOUS_OWNED_POSITIONS";
+         return false;
+      }
+
+      resolved_ticket=candidate_ticket;
+      position_identifier=(ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   }
+
+   if(resolved_ticket==0)
+   {
+      reject_reason="POSITION_NOT_FOUND";
+      return false;
+   }
+   return true;
+}
+
 void ExecuteClose(string id,string sym,ulong ticket)
 {
-   if(ticket<=0&&PositionSelect(sym)) ticket=PositionGetInteger(POSITION_TICKET);
-   if(ticket>0)
+   ulong owned_ticket=0;
+   ulong position_identifier=0;
+   string reject_reason="";
+   if(!TryResolveOwnedClosePosition(sym,ticket,owned_ticket,position_identifier,reject_reason))
    {
-      ulong position_identifier = 0;
-      if(PositionSelectByTicket(ticket))
-         position_identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
-      ResetLastError();
-      bool close_request_ok = trade.PositionClose(ticket);
-      if(IsTradeResultSuccessful(close_request_ok, "Webhook CLOSE", ticket))
-      {
-         double pf=0.0, history_exit_price=0.0;
-         ENUM_DEAL_REASON unused_deal_reason = DEAL_REASON_CLIENT;
-         bool exit_history_found = GetClosedPositionResult(position_identifier, history_exit_price, pf, unused_deal_reason);
-         string close_status = !exit_history_found ? "CLOSED_UNRESOLVED" : (pf>=0?"WIN":"LOSS");
-         double reported_exit_price = history_exit_price > 0.0 ? history_exit_price : trade.ResultPrice();
-         UpdateSignalStatus(id,close_status,ticket,0.0,reported_exit_price,pf);
-      } else UpdateSignalStatus(id,"CLOSE_FAILED",0,0.0,0.0,0.0);
-   } else UpdateSignalStatus(id,"CLOSED_NOT_FOUND",0,0.0,0.0,0.0);
+      Print("ATS EA WEBHOOK REJECT: CLOSE ownership check failed id=",id,
+            " symbol=",sym," requested_ticket=",ticket," reason=",reject_reason);
+      string rejected_status=(reject_reason=="POSITION_NOT_FOUND" ? "CLOSED_NOT_FOUND" : "CLOSE_FAILED");
+      UpdateSignalStatus(id,rejected_status,ticket,0.0,0.0,0.0);
+      return;
+   }
+
+   ulong revalidated_ticket=0;
+   ulong revalidated_identifier=0;
+   string revalidation_reason="";
+   if(!TryResolveOwnedClosePosition(sym,owned_ticket,revalidated_ticket,
+                                    revalidated_identifier,revalidation_reason))
+   {
+      Print("ATS EA WEBHOOK REJECT: CLOSE ownership changed before submission id=",id,
+            " symbol=",sym," ticket=",owned_ticket," reason=",revalidation_reason);
+      UpdateSignalStatus(id,"CLOSE_FAILED",owned_ticket,0.0,0.0,0.0);
+      return;
+   }
+   owned_ticket=revalidated_ticket;
+   position_identifier=revalidated_identifier;
+
+   ResetLastError();
+   bool close_request_ok = trade.PositionClose(owned_ticket);
+   if(IsTradeResultSuccessful(close_request_ok, "Webhook CLOSE", owned_ticket))
+   {
+      double pf=0.0, history_exit_price=0.0;
+      ENUM_DEAL_REASON unused_deal_reason = DEAL_REASON_CLIENT;
+      bool exit_history_found = GetClosedPositionResult(position_identifier, history_exit_price, pf, unused_deal_reason);
+      string close_status = !exit_history_found ? "CLOSED_UNRESOLVED" : (pf>=0?"WIN":"LOSS");
+      double reported_exit_price = history_exit_price > 0.0 ? history_exit_price : trade.ResultPrice();
+      UpdateSignalStatus(id,close_status,owned_ticket,0.0,reported_exit_price,pf);
+   } else UpdateSignalStatus(id,"CLOSE_FAILED",0,0.0,0.0,0.0);
 }
 
 void UpdateSignalStatus(string id,string status,ulong ticket,double ep,double xp,double pf)
