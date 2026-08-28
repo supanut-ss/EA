@@ -17,9 +17,11 @@
 //|      see the note above the inputs before changing broker.        |
 //|   3) Two protection levels, each firing once per basket:          |
 //|      LEVEL 1 - at InpBE_TriggerPoints (default 3000 = 3.00) every |
-//|        still-open order has its SL moved to its own entry price.  |
-//|        Nothing is closed; the basket just stops being able to     |
-//|        lose.                                                      |
+//|        still-open order has its SL moved to its own entry plus    |
+//|        InpBE_LockPoints (default 120 = 0.12), which buys back the |
+//|        commission/swap a stop parked exactly at entry would still |
+//|        pay. Nothing is closed; the basket just stops being able   |
+//|        to lose.                                                   |
 //|      LEVEL 2 - at InpPartialCloseTrigger (default 5000 = 5.00)    |
 //|        InpCloseCountOnBE orders (default 2, newest first) are     |
 //|        closed to bank profit, and the survivors hand their fixed  |
@@ -98,6 +100,7 @@ input int      InpTP_Points          = 10000;  // Take Profit distance (points =
 
 input group "=== Breakeven & Partial Close (two separate levels, each fires once) ==="
 input int      InpBE_TriggerPoints   = 3000;   // LEVEL 1 (3000 = 3.00): move every open order to its own breakeven - risk off, nothing closed yet
+input int      InpBE_LockPoints      = 120;    // Points BEYOND each order's own entry to park the breakeven SL - covers commission/swap (110 = the $0.11 round-turn charge exactly, at any lot size; 0 = park it on the entry and eat the commission)
 input int      InpPartialCloseTrigger = 5000;  // LEVEL 2 (5000 = 5.00): bank the partial close below, then hand the survivors to the trailing stop
 input int      InpCloseCountOnBE     = 2;      // Number of orders to close at LEVEL 2, newest first (2 of 5 banked, 3 left running)
 
@@ -163,6 +166,11 @@ int OnInit()
       Print("AutoMultiplier: WARNING - InpMaxTP_Points=", InpMaxTP_Points, " is smaller than the initial ",
             "InpTP_Points=", InpTP_Points, " - every order's starting TP will already be past the cap");
 
+   if(InpBE_LockPoints >= InpBE_TriggerPoints)
+      Print("AutoMultiplier: WARNING - InpBE_LockPoints=", InpBE_LockPoints,
+            " is not below InpBE_TriggerPoints=", InpBE_TriggerPoints,
+            " - the breakeven stop would land at or past the price that triggers it and be rejected");
+
    if(InpPartialCloseTrigger < InpBE_TriggerPoints)
       Print("AutoMultiplier: NOTE - partial-close level (", InpPartialCloseTrigger,
             ") is below the breakeven level (", InpBE_TriggerPoints,
@@ -190,6 +198,7 @@ int OnInit()
    Print("AutoMultiplier: SL ", InpSL_Points, " = ", DoubleToString(InpSL_Points * _Point, _Digits),
          " | TP ", InpTP_Points, " = ", DoubleToString(InpTP_Points * _Point, _Digits),
          " | BE ", InpBE_TriggerPoints, " = ", DoubleToString(InpBE_TriggerPoints * _Point, _Digits),
+         " (locks +", DoubleToString(InpBE_LockPoints * _Point, _Digits), ")",
          " | partial close ", InpPartialCloseTrigger, " = ", DoubleToString(InpPartialCloseTrigger * _Point, _Digits),
          " | trail distance ", InpTrailDistancePoints, " = ", DoubleToString(InpTrailDistancePoints * _Point, _Digits));
 
@@ -457,11 +466,26 @@ double TrailingModeTP(Basket &bk, double curTP)
 //| Move every still-open order in the basket to its own breakeven.   |
 //| TP is left exactly as it is - the handover to trailing happens    |
 //| later, at the partial-close level (see HandOverToTrailing).       |
+//|                                                                     |
+//| InpBE_LockPoints parks the stop that many points BEYOND the entry  |
+//| rather than exactly on it. A stop sitting precisely at the open    |
+//| price is break-even on PRICE but not on money: MT5's profit figure |
+//| already nets out the spread (a buy enters at ask and exits at bid, |
+//| so bid == entry really is zero gross), but commission and swap are |
+//| charged separately on top and would still make the trade close     |
+//| slightly negative. The offset buys back exactly those costs.       |
+//|                                                                     |
+//| Sizing it is lot-independent, because commission and profit-per-   |
+//| point both scale with volume: on XAUUSD (100 oz/lot) a 0.01 lot is |
+//| 1 oz, so 1 point = 0.001 = $0.001, and a $0.11 round-turn          |
+//| commission is covered by 110 points no matter what lot is traded.  |
+//| The offset is applied per order, off that order's own entry.       |
 //+------------------------------------------------------------------+
 void ApplyBreakevenToBasket(Basket &bk, double stopsLevel)
   {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double lock = InpBE_LockPoints * _Point;
 
    for(int i=0; i<bk.ticketCount; i++)
      {
@@ -470,7 +494,7 @@ void ApplyBreakevenToBasket(Basket &bk, double stopsLevel)
 
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double curTP     = PositionGetDouble(POSITION_TP);
-      double newSL     = NormalizeDouble(openPrice, _Digits);
+      double newSL     = NormalizeDouble((bk.direction == 1) ? openPrice + lock : openPrice - lock, _Digits);
 
       bool okDistance = (bk.direction == 1) ? (bid - newSL) > stopsLevel : (newSL - ask) > stopsLevel;
       if(!okDistance)
