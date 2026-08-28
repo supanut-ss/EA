@@ -30,10 +30,15 @@ input int      InpSignalDedupDays      = 30;                    // เก็บ�
 input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Tester server offset from UTC (for example 2 or 3)
 
 // account_id ในฝั่ง backend (ดู Backend/EaConsole.Api/Controllers/
-// SignalsController.cs - EA3's payload ไม่มี accountId ให้เลือกเอง เลย
-// hardcode ไว้ทั้งสองฝั่งให้ตรงกัน) 2026-08-14: ย้ายจาก account_id=1
+// SignalsController.cs) 2026-08-14: ย้ายจาก account_id=1
 // (เดิมใช้ร่วมกับ EA1/EA2) ไปเป็นบัญชี Live จริงของตัวเอง (Exness-MT5Real8)
-#define ATS_BACKEND_ACCOUNT_ID 2
+//
+// 2026-08-28: เดิมเป็น #define hardcode ตรงกันทั้งสองฝั่ง แก้จากหน้าจอ MT5
+// ไม่ได้เลย - พอเอา EA ไปแนบบัญชี demo มันจะเขียนทับ snapshot ของบัญชี Live
+// และยัดเทรด demo เข้าไปในประวัติของ Live ด้วย ตอนนี้ EA ส่ง account_id ไป
+// กับ payload แล้ว (backend fallback เป็น 2 ถ้า build เก่าไม่ได้ส่งมา) จึง
+// ตั้งแยกพอร์ตได้จากหน้าจอ แบบเดียวกับ InpIngestAccountId ของ EA1/EA2
+input int      InpBackendAccountId     = 2;                     // account_id ฝั่ง backend ของพอร์ตนี้ (ต้องมีแถวใน accounts table - ใช้ id คนละตัวเมื่อรันบัญชี demo)
 
 input group "== Trade Settings =="
 input int      InpSlippage             = 20;                    // ระยะ Slippage สูงสุดที่ยอมรับได้ (Points)
@@ -762,12 +767,12 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
    if(!IsExternalIntegrationAllowed()) return;
    string url  = backend_url + "/api/signals/local";
    string hdr  = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
-   string pay  = StringFormat("{\"token\":\"%s\",\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
+   string pay  = StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
                               "\"volume\":%s,\"entry_price\":%s,\"sl\":%s,\"tp\":%s,"
                               "\"status\":\"%s\",\"ticket\":\"%s\",\"exit_price\":%s,\"profit\":%s,"
                               "\"mfe\":%s,\"mae\":%s,\"adx\":%s,\"chop\":%s,\"atr_ratio\":%s,\"is_low_vol\":%s,"
                               "\"entry_condition\":\"%s\",\"close_reason\":\"%s\"}",
-                              auth_token, id, action, symbol,
+                              auth_token, InpBackendAccountId, id, action, symbol,
                               DoubleToString(volume,2), DoubleToString(entry_price,2),
                               DoubleToString(sl,2), DoubleToString(tp,2),
                               status, IntegerToString(ticket),
@@ -808,7 +813,7 @@ void SendActivityLog(string level, string message)
    string url = backend_url + "/api/ingest/log";
    string hdr = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
    string pay = StringFormat("{\"accountId\":%d,\"eaId\":3,\"level\":\"%s\",\"message\":\"%s\",\"eventTimeBroker\":\"%s\"}",
-                              ATS_BACKEND_ACCOUNT_ID, level, AtsJsonEscape(message), eventTime);
+                              InpBackendAccountId, level, AtsJsonEscape(message), eventTime);
    char pd[], rd[]; string rh;
    StringToCharArray(pay, pd, 0, StringLen(pay), CP_UTF8);
    ResetLastError();
@@ -2602,8 +2607,8 @@ string GetMT5StateJson()
       cnt++;
    }
    pj+="]";
-   return StringFormat("{\"token\":\"%s\",\"balance\":%s,\"equity\":%s,\"free_margin\":%s,\"bid\":%s,\"ask\":%s,\"positions\":%s}",
-      auth_token,DoubleToString(bal,2),DoubleToString(eq,2),DoubleToString(fm,2),
+   return StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"balance\":%s,\"equity\":%s,\"free_margin\":%s,\"bid\":%s,\"ask\":%s,\"positions\":%s}",
+      auth_token,InpBackendAccountId,DoubleToString(bal,2),DoubleToString(eq,2),DoubleToString(fm,2),
       DoubleToString(bid,5),DoubleToString(ask,5),pj);
 }
 
@@ -3210,9 +3215,9 @@ void ExecuteClose(string id,string sym,ulong ticket)
 void UpdateSignalStatus(string id,string status,ulong ticket,double ep,double xp,double pf)
 {
    string url=backend_url+"/api/signals/update", hdr="Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
-   string pay=StringFormat("{\"token\":\"%s\",\"id\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\","
+   string pay=StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"id\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\","
                            "\"entry_price\":%s,\"exit_price\":%s,\"profit\":%s}",
-      auth_token,id,status,IntegerToString(ticket),
+      auth_token,InpBackendAccountId,id,status,IntegerToString(ticket),
       DoubleToString(ep,2),DoubleToString(xp,2),DoubleToString(pf,2));
    char pd[],rd[]; string rh;
    StringToCharArray(pay,pd,0,StringLen(pay),CP_UTF8);

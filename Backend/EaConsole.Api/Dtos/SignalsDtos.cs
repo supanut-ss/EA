@@ -18,7 +18,13 @@ public record SignalPendingRequest(
     [property: JsonPropertyName("equity")] decimal Equity,
     [property: JsonPropertyName("free_margin")] decimal FreeMargin,
     [property: JsonPropertyName("bid")] decimal Bid,
-    [property: JsonPropertyName("ask")] decimal Ask
+    [property: JsonPropertyName("ask")] decimal Ask,
+    // Which account this EA3 instance is reporting for. Null from any build
+    // older than 2026-08-28 (the field did not exist and the account was
+    // hardcoded on both sides), so SignalsController falls back to its
+    // DefaultAccountId - letting a demo instance point itself somewhere else
+    // without disturbing an already-attached live one.
+    [property: JsonPropertyName("account_id")] int? AccountId = null
     // "positions" array intentionally omitted - each position is already
     // reported individually via /api/signals/local on open/close, and
     // System.Text.Json ignores JSON properties with no matching DTO member.
@@ -44,7 +50,9 @@ public record SignalLocalTradeRequest(
     [property: JsonPropertyName("ticket")] string Ticket,
     [property: JsonPropertyName("exit_price")] decimal ExitPrice,
     [property: JsonPropertyName("profit")] decimal Profit,
-    [property: JsonPropertyName("close_reason")] string? CloseReason = null
+    [property: JsonPropertyName("close_reason")] string? CloseReason = null,
+    // See SignalPendingRequest.AccountId - null on pre-2026-08-28 EA builds.
+    [property: JsonPropertyName("account_id")] int? AccountId = null
 );
 
 // POST /api/signals/update - lifecycle status for a WEBHOOK-sourced signal
@@ -58,5 +66,7 @@ public record SignalUpdateRequest(
     [property: JsonPropertyName("ticket")] string? Ticket,
     [property: JsonPropertyName("entry_price")] decimal EntryPrice,
     [property: JsonPropertyName("exit_price")] decimal ExitPrice,
-    [property: JsonPropertyName("profit")] decimal Profit
+    [property: JsonPropertyName("profit")] decimal Profit,
+    // See SignalPendingRequest.AccountId - null on pre-2026-08-28 EA builds.
+    [property: JsonPropertyName("account_id")] int? AccountId = null
 );
