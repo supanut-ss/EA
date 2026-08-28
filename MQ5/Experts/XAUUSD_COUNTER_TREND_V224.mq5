@@ -39,6 +39,10 @@ input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Test
 // กับ payload แล้ว (backend fallback เป็น 2 ถ้า build เก่าไม่ได้ส่งมา) จึง
 // ตั้งแยกพอร์ตได้จากหน้าจอ แบบเดียวกับ InpIngestAccountId ของ EA1/EA2
 input int      InpBackendAccountId     = 2;                     // account_id ฝั่ง backend ของพอร์ตนี้ (ต้องมีแถวใน accounts table - ใช้ id คนละตัวเมื่อรันบัญชี demo)
+// 1 แถวใน eas ผูกกับบัญชีเดียว (schema.sql: fk_eas_account) และ dashboard
+// list EA ตาม account แล้วกรองเทรดด้วย ea_id ของบัญชีนั้น - ย้ายพอร์ตจึงต้อง
+// เปลี่ยน ea_id ตามด้วย ไม่งั้นเทรดกับ log จะถูกกรองหายไปทั้งหมด
+input int      InpBackendEaId          = 3;                     // ea_id ฝั่ง backend ของ EA ตัวนี้ (ต้องเป็นแถวที่ account_id ตรงกับ InpBackendAccountId)
 
 input group "== Trade Settings =="
 input int      InpSlippage             = 20;                    // ระยะ Slippage สูงสุดที่ยอมรับได้ (Points)
@@ -767,12 +771,12 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
    if(!IsExternalIntegrationAllowed()) return;
    string url  = backend_url + "/api/signals/local";
    string hdr  = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
-   string pay  = StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
+   string pay  = StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"ea_id\":%d,\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
                               "\"volume\":%s,\"entry_price\":%s,\"sl\":%s,\"tp\":%s,"
                               "\"status\":\"%s\",\"ticket\":\"%s\",\"exit_price\":%s,\"profit\":%s,"
                               "\"mfe\":%s,\"mae\":%s,\"adx\":%s,\"chop\":%s,\"atr_ratio\":%s,\"is_low_vol\":%s,"
                               "\"entry_condition\":\"%s\",\"close_reason\":\"%s\"}",
-                              auth_token, InpBackendAccountId, id, action, symbol,
+                              auth_token, InpBackendAccountId, InpBackendEaId, id, action, symbol,
                               DoubleToString(volume,2), DoubleToString(entry_price,2),
                               DoubleToString(sl,2), DoubleToString(tp,2),
                               status, IntegerToString(ticket),
@@ -812,8 +816,8 @@ void SendActivityLog(string level, string message)
 
    string url = backend_url + "/api/ingest/log";
    string hdr = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
-   string pay = StringFormat("{\"accountId\":%d,\"eaId\":3,\"level\":\"%s\",\"message\":\"%s\",\"eventTimeBroker\":\"%s\"}",
-                              InpBackendAccountId, level, AtsJsonEscape(message), eventTime);
+   string pay = StringFormat("{\"accountId\":%d,\"eaId\":%d,\"level\":\"%s\",\"message\":\"%s\",\"eventTimeBroker\":\"%s\"}",
+                              InpBackendAccountId, InpBackendEaId, level, AtsJsonEscape(message), eventTime);
    char pd[], rd[]; string rh;
    StringToCharArray(pay, pd, 0, StringLen(pay), CP_UTF8);
    ResetLastError();
@@ -3215,9 +3219,9 @@ void ExecuteClose(string id,string sym,ulong ticket)
 void UpdateSignalStatus(string id,string status,ulong ticket,double ep,double xp,double pf)
 {
    string url=backend_url+"/api/signals/update", hdr="Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
-   string pay=StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"id\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\","
+   string pay=StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"ea_id\":%d,\"id\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\","
                            "\"entry_price\":%s,\"exit_price\":%s,\"profit\":%s}",
-      auth_token,InpBackendAccountId,id,status,IntegerToString(ticket),
+      auth_token,InpBackendAccountId,InpBackendEaId,id,status,IntegerToString(ticket),
       DoubleToString(ep,2),DoubleToString(xp,2),DoubleToString(pf,2));
    char pd[],rd[]; string rh;
    StringToCharArray(pay,pd,0,StringLen(pay),CP_UTF8);

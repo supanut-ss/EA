@@ -52,7 +52,13 @@ public record SignalLocalTradeRequest(
     [property: JsonPropertyName("profit")] decimal Profit,
     [property: JsonPropertyName("close_reason")] string? CloseReason = null,
     // See SignalPendingRequest.AccountId - null on pre-2026-08-28 EA builds.
-    [property: JsonPropertyName("account_id")] int? AccountId = null
+    [property: JsonPropertyName("account_id")] int? AccountId = null,
+    // An eas row belongs to exactly one account, so moving an instance to a
+    // different account means a different ea_id too - the dashboard lists EAs
+    // by account and filters trades to that account's ea_ids, so a trade
+    // carrying an ea_id registered under some OTHER account is dropped from
+    // every per-EA view. Null on older builds -> DefaultEa3Id.
+    [property: JsonPropertyName("ea_id")] int? EaId = null
 );
 
 // POST /api/signals/update - lifecycle status for a WEBHOOK-sourced signal
@@ -68,5 +74,7 @@ public record SignalUpdateRequest(
     [property: JsonPropertyName("exit_price")] decimal ExitPrice,
     [property: JsonPropertyName("profit")] decimal Profit,
     // See SignalPendingRequest.AccountId - null on pre-2026-08-28 EA builds.
-    [property: JsonPropertyName("account_id")] int? AccountId = null
+    [property: JsonPropertyName("account_id")] int? AccountId = null,
+    // See SignalLocalTradeRequest.EaId.
+    [property: JsonPropertyName("ea_id")] int? EaId = null
 );
