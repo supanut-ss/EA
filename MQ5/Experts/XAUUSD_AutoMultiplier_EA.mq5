@@ -22,13 +22,17 @@
 //|        commission/swap a stop parked exactly at entry would still |
 //|        pay. Nothing is closed; the basket just stops being able   |
 //|        to lose.                                                   |
-//|      LEVEL 2 - at InpPartialCloseTrigger (default 5000 = 5.00)    |
-//|        InpCloseCountOnBE orders (default 2, newest first) are     |
-//|        closed to bank profit, and the survivors hand their fixed  |
-//|        TP over to the trailing stop below. A default 5-order      |
-//|        basket banks 2 here and leaves 3 running.                  |
+//|      LEVEL 2 - at InpPartialCloseTrigger (default 5000 = 5.00) the |
+//|        newest InpForceBECount orders (default 2, the ones that     |
+//|        used to be closed here) are force-breakeven'd right now,    |
+//|        regardless of whether LEVEL 1 has reached them yet. The     |
+//|        rest of the basket is left alone here - LEVEL 1 still gets  |
+//|        to them on its own trigger. Every order in the basket, both |
+//|        groups, then hands its fixed TP over to the trailing stop   |
+//|        below - nothing is closed here, the whole basket just       |
+//|        starts running on the trail.                                |
 //|   4) Peak trailing (InpUseTrailing, ON by default): from LEVEL 2   |
-//|      onward the survivors' fixed TP is CLEARED                    |
+//|      onward every order's fixed TP is CLEARED                     |
 //|      (InpTrailRemoveTP) so a winner can actually                  |
 //|      run. From then on each order's SL is held                    |
 //|      InpTrailDistancePoints (default 3000 = 3.00) behind the best |
@@ -39,7 +43,11 @@
 //|      flatten the whole basket at a single price.                  |
 //|      InpMaxTP_Points, if set, becomes the one hard exit target.   |
 //|      See TrailBasketByPeak for why SL is anchored to the peak     |
-//|      instead of being stepped alongside TP.                       |
+//|      instead of being stepped alongside TP. The LEVEL 2 group      |
+//|      additionally gets a floor: their stop is never accepted below |
+//|      the InpPartialCloseTrigger profit level they already earned,  |
+//|      even on a peak too fresh for the plain formula to clear that   |
+//|      on its own - the rest of the basket has no such floor.        |
 //|   5) Optional extra profit lock: if InpUseProfitLock is on, once  |
 //|      basket profit reaches InpProfitLockTriggerPoints (default    |
 //|      12500 = 12.50), SL is pulled forward (once) to lock in       |
@@ -98,11 +106,11 @@ input group "=== Stop Loss / Take Profit (fixed points, R:R 1:2) ==="
 input int      InpSL_Points          = 5000;   // Stop Loss distance (points = 5.00 on 3-decimal gold), applied to every order in the basket
 input int      InpTP_Points          = 10000;  // Take Profit distance (points = 10.00 on 3-decimal gold), applied to every order in the basket
 
-input group "=== Breakeven & Partial Close (two separate levels, each fires once) ==="
+input group "=== Breakeven & Trailing Handover (two separate levels, each fires once) ==="
 input int      InpBE_TriggerPoints   = 3000;   // LEVEL 1 (3000 = 3.00): move every open order to its own breakeven - risk off, nothing closed yet
 input int      InpBE_LockPoints      = 120;    // Points BEYOND each order's own entry to park the breakeven SL - covers commission/swap (110 = the $0.11 round-turn charge exactly, at any lot size; 0 = park it on the entry and eat the commission)
-input int      InpPartialCloseTrigger = 5000;  // LEVEL 2 (5000 = 5.00): bank the partial close below, then hand the survivors to the trailing stop
-input int      InpCloseCountOnBE     = 2;      // Number of orders to close at LEVEL 2, newest first (2 of 5 banked, 3 left running)
+input int      InpPartialCloseTrigger = 5000;  // LEVEL 2 (5000 = 5.00): force-breakeven the newest InpForceBECount orders (they used to be closed here) and hand the WHOLE basket over to the trailing stop
+input int      InpForceBECount        = 2;      // Newest N orders to force-breakeven at LEVEL 2, regardless of LEVEL 1's own trigger; the rest of the basket keeps waiting for LEVEL 1 to reach them normally
 
 input group "=== Trailing (peak-based; takes over after breakeven) ==="
 input bool     InpUseTrailing         = true;  // Let the remaining orders run on a trailing stop instead of a fixed TP
@@ -129,11 +137,23 @@ struct Basket
    int      direction;                     // 1 = buy, -1 = sell
    double   originPrice;                   // trigger (manual) position's open price - BE/profit-lock anchor
    bool     beApplied;
-   bool     partialDone;                   // LEVEL 2 reached: partial banked and TP handed over to the trailing stop
+   bool     partialDone;                   // LEVEL 2 reached: breakeven ensured and TP handed over to the trailing stop
    bool     profitLockApplied;
    double   peakPrice;                     // best price this basket has seen (high-water mark) - the trailing stop is measured back from here
    ulong    tickets[MAX_BASKET_POSITIONS];
    int      ticketCount;
+
+   // The LEVEL 2 force-breakeven group, snapshotted by TICKET (not array
+   // index) the moment LEVEL 2 fires - PruneClosedTickets compacts
+   // `tickets[]` as orders close, so an index range would drift out from
+   // under a later order. These tickets proved the basket could reach
+   // InpPartialCloseTrigger profit, so their trailing stop is never
+   // allowed to settle for protecting less than that (see forceBeFloorPrice
+   // in TrailBasketByPeak) - unlike the rest of the basket, which trails
+   // on the plain peak-minus-distance formula with no such floor.
+   ulong    forceBeTickets[MAX_BASKET_POSITIONS];
+   int      forceBeTicketCount;
+   double   forceBeFloorPrice;
   };
 Basket g_baskets[];
 
@@ -172,9 +192,15 @@ int OnInit()
             " - the breakeven stop would land at or past the price that triggers it and be rejected");
 
    if(InpPartialCloseTrigger < InpBE_TriggerPoints)
-      Print("AutoMultiplier: NOTE - partial-close level (", InpPartialCloseTrigger,
+      Print("AutoMultiplier: NOTE - trailing-handover level (", InpPartialCloseTrigger,
             ") is below the breakeven level (", InpBE_TriggerPoints,
-            "), so the partial banks first and breakeven follows");
+            "), so the newest ", InpForceBECount, " order(s) will be force-breakeven'd at LEVEL 2 before ",
+            "LEVEL 1 ever fires; the rest of the basket still waits for LEVEL 1 as normal");
+
+   if(InpForceBECount > 0 && InpForceBECount >= InpAutoAddCount + 1)
+      Print("AutoMultiplier: NOTE - InpForceBECount=", InpForceBECount, " covers the entire ",
+            InpAutoAddCount + 1, "-order basket, so every order gets force-breakeven'd at LEVEL 2 ",
+            "and LEVEL 1 will have nothing left to do");
 
    if(InpUseTrailing && InpTrailDistancePoints <= 0)
       Print("AutoMultiplier: WARNING - InpTrailDistancePoints=", InpTrailDistancePoints,
@@ -199,7 +225,7 @@ int OnInit()
          " | TP ", InpTP_Points, " = ", DoubleToString(InpTP_Points * _Point, _Digits),
          " | BE ", InpBE_TriggerPoints, " = ", DoubleToString(InpBE_TriggerPoints * _Point, _Digits),
          " (locks +", DoubleToString(InpBE_LockPoints * _Point, _Digits), ")",
-         " | partial close ", InpPartialCloseTrigger, " = ", DoubleToString(InpPartialCloseTrigger * _Point, _Digits),
+         " | trailing handover ", InpPartialCloseTrigger, " = ", DoubleToString(InpPartialCloseTrigger * _Point, _Digits),
          " | trail distance ", InpTrailDistancePoints, " = ", DoubleToString(InpTrailDistancePoints * _Point, _Digits));
 
    Print("AutoMultiplier: ready - waiting for a manually-opened (Magic=0) position on ", symbolName);
@@ -413,6 +439,8 @@ void TryCreateBasketFromManualPosition(ulong positionId)
    g_baskets[bi].profitLockApplied = false;
    g_baskets[bi].peakPrice         = openPrice;
    g_baskets[bi].ticketCount       = 0;
+   g_baskets[bi].forceBeTicketCount = 0;
+   g_baskets[bi].forceBeFloorPrice  = 0.0;
    AddTicketToBasket(g_baskets[bi], positionId);
 
    Print("AutoMultiplier: manual ", (direction == 1 ? "BUY" : "SELL"), " #", positionId,
@@ -442,6 +470,15 @@ void PruneClosedTickets(Basket &bk)
   }
 
 //+------------------------------------------------------------------+
+bool IsForceBeTicket(Basket &bk, ulong ticket)
+  {
+   for(int i=0; i<bk.forceBeTicketCount; i++)
+      if(bk.forceBeTickets[i] == ticket)
+         return(true);
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 //| The TP an order should carry once trailing has taken over. With    |
 //| InpTrailRemoveTP the fixed TP is cleared (0 = no TP in MT5) so the |
 //| trailing stop becomes the ONLY exit and a winner is free to run;   |
@@ -463,9 +500,11 @@ double TrailingModeTP(Basket &bk, double curTP)
   }
 
 //+------------------------------------------------------------------+
-//| Move every still-open order in the basket to its own breakeven.   |
-//| TP is left exactly as it is - the handover to trailing happens    |
-//| later, at the partial-close level (see HandOverToTrailing).       |
+//| Move a still-open order to its own breakeven (LEVEL 1 calls this  |
+//| for the whole basket; LEVEL 2 calls it for just the newest        |
+//| InpForceBECount orders via ApplyBreakevenToRange). TP is left     |
+//| exactly as it is - the handover to trailing happens later, at     |
+//| LEVEL 2 (see HandOverToTrailing).                                  |
 //|                                                                     |
 //| InpBE_LockPoints parks the stop that many points BEYOND the entry  |
 //| rather than exactly on it. A stop sitting precisely at the open    |
@@ -481,13 +520,14 @@ double TrailingModeTP(Basket &bk, double curTP)
 //| commission is covered by 110 points no matter what lot is traded.  |
 //| The offset is applied per order, off that order's own entry.       |
 //+------------------------------------------------------------------+
-void ApplyBreakevenToBasket(Basket &bk, double stopsLevel)
+void ApplyBreakevenToRange(Basket &bk, int startIdx, int count, double stopsLevel)
   {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double lock = InpBE_LockPoints * _Point;
 
-   for(int i=0; i<bk.ticketCount; i++)
+   int endIdx = MathMin(startIdx + count, bk.ticketCount);
+   for(int i=MathMax(startIdx, 0); i<endIdx; i++)
      {
       ulong ticket = bk.tickets[i];
       if(!PositionSelectByTicket(ticket)) continue;
@@ -509,8 +549,14 @@ void ApplyBreakevenToBasket(Basket &bk, double stopsLevel)
   }
 
 //+------------------------------------------------------------------+
-//| Rewrite the TP of every surviving order according to the trailing |
-//| policy. Called once, at the partial-close level, which is the      |
+void ApplyBreakevenToBasket(Basket &bk, double stopsLevel)
+  {
+   ApplyBreakevenToRange(bk, 0, bk.ticketCount, stopsLevel);
+  }
+
+//+------------------------------------------------------------------+
+//| Rewrite the TP of every still-open order in the basket according  |
+//| to the trailing policy. Called once, at LEVEL 2, which is the      |
 //| moment the trailing stop takes over as the exit mechanism.         |
 //+------------------------------------------------------------------+
 void HandOverToTrailing(Basket &bk, double stopsLevel)
@@ -593,23 +639,6 @@ void ApplyProfitLockToBasket(Basket &bk, double stopsLevel)
   }
 
 //+------------------------------------------------------------------+
-//| Close the most-recently-added `count` orders in the basket, back  |
-//| to front, so the original manual order and earliest auto orders   |
-//| are the ones left running under the breakeven guard.               |
-//+------------------------------------------------------------------+
-void ClosePartialForBasket(Basket &bk, int count)
-  {
-   int toClose = MathMin(count, bk.ticketCount);
-   for(int c=0; c<toClose; c++)
-     {
-      int idx = bk.ticketCount - 1 - c;
-      ulong ticket = bk.tickets[idx];
-      if(!trade.PositionClose(ticket))
-         Print("AutoMultiplier: partial close failed on #", ticket, " - ", trade.ResultRetcodeDescription());
-     }
-  }
-
-//+------------------------------------------------------------------+
 //| Hold every remaining order's SL a fixed distance behind the best   |
 //| price the basket has SEEN (bk.peakPrice), not behind the price it  |
 //| happens to be at when this runs. A high-water mark cannot move     |
@@ -632,6 +661,20 @@ void ClosePartialForBasket(Basket &bk, int count)
 //| Here SL is anchored to the peak and TP is out of the picture       |
 //| entirely (see TrailingModeTP) - there is no pair to keep in sync   |
 //| and nothing to race.                                               |
+//|                                                                     |
+//| One exception to the plain peak-minus-distance formula: the LEVEL  |
+//| 2 force-breakeven orders (bk.forceBeTickets) already proved the     |
+//| basket reaches InpPartialCloseTrigger profit, so their target is    |
+//| floored at bk.forceBeFloorPrice. Without this, a peak that has only |
+//| just cleared the LEVEL 2 trigger (e.g. peak = 600 with a 300-point  |
+//| trail distance, on a broker where LEVEL 2 = 500) would compute a    |
+//| target of only 300 - LESS than what LEVEL 2 already earned, and     |
+//| the ratchet-forward check would happily accept it since it's still |
+//| better than the breakeven stop it's replacing. The floor is only a |
+//| minimum: once the peak has run far enough that the plain formula    |
+//| clears the floor on its own, this has no effect. It does not apply |
+//| to the rest of the basket, which trails on the plain formula with   |
+//| no such floor.                                                      |
 //+------------------------------------------------------------------+
 void TrailBasketByPeak(Basket &bk, double stopsLevel)
   {
@@ -652,6 +695,10 @@ void TrailBasketByPeak(Basket &bk, double stopsLevel)
       double target = (bk.direction == 1) ? bk.peakPrice - trailDistance
                                           : bk.peakPrice + trailDistance;
 
+      if(IsForceBeTicket(bk, ticket))
+         target = (bk.direction == 1) ? MathMax(target, bk.forceBeFloorPrice)
+                                       : MathMin(target, bk.forceBeFloorPrice);
+
       double curSL = PositionGetDouble(POSITION_SL);
       double curTP = PositionGetDouble(POSITION_TP);
 
@@ -670,9 +717,9 @@ void TrailBasketByPeak(Basket &bk, double stopsLevel)
   }
 
 //+------------------------------------------------------------------+
-//| Per-tick basket maintenance: drop closed tickets, apply the       |
-//| once-off breakeven + partial close, then (optionally) keep         |
-//| trailing SL/TP forward in fixed steps.                             |
+//| Per-tick basket maintenance: drop closed tickets, apply the two    |
+//| once-off breakeven levels and the LEVEL 2 trailing handover, then  |
+//| (optionally) keep trailing SL forward in fixed steps.              |
 //+------------------------------------------------------------------+
 void ManageBaskets()
   {
@@ -714,17 +761,34 @@ void ManageBaskets()
 
       if(!g_baskets[b].partialDone && profitPoints >= InpPartialCloseTrigger)
         {
-         // LEVEL 2 - bank the partial, then hand the survivors over to the
-         // trailing stop by clearing their fixed TP.
-         ClosePartialForBasket(g_baskets[b], InpCloseCountOnBE);
-         g_baskets[b].partialDone = true;
+         // LEVEL 2 - nothing is closed here anymore. The newest
+         // InpForceBECount orders (the ones that used to get banked/closed)
+         // are force-breakeven'd right now, regardless of whether LEVEL 1
+         // has fired yet. The rest of the basket is left alone here - if
+         // LEVEL 1 hasn't reached them yet, it still will, on its own
+         // trigger, untouched by this level. Every order in the basket -
+         // both groups - then hands its fixed TP over to the trailing stop.
+         int splitStart = MathMax(0, g_baskets[b].ticketCount - InpForceBECount);
 
-         PruneClosedTickets(g_baskets[b]);
-         if(g_baskets[b].ticketCount == 0)
+         // Snapshot which tickets are the force-BE group, by ID, before
+         // trailing (and any later PruneClosedTickets) can shuffle indices.
+         // These orders just proved the basket reaches InpPartialCloseTrigger
+         // profit - TrailBasketByPeak uses forceBeFloorPrice to make sure
+         // their stop is never accepted below that level, even on a peak
+         // that hasn't run far enough past it yet for the plain
+         // peak-minus-distance formula to clear it on its own.
+         g_baskets[b].forceBeTicketCount = 0;
+         for(int i=splitStart; i<g_baskets[b].ticketCount; i++)
            {
-            ArrayRemove(g_baskets, b, 1);
-            continue;
+            g_baskets[b].forceBeTickets[g_baskets[b].forceBeTicketCount] = g_baskets[b].tickets[i];
+            g_baskets[b].forceBeTicketCount++;
            }
+         g_baskets[b].forceBeFloorPrice = (g_baskets[b].direction == 1)
+            ? originPrice + InpPartialCloseTrigger * _Point
+            : originPrice - InpPartialCloseTrigger * _Point;
+
+         ApplyBreakevenToRange(g_baskets[b], splitStart, InpForceBECount, stopsLevel);
+         g_baskets[b].partialDone = true;
 
          HandOverToTrailing(g_baskets[b], stopsLevel);
         }
@@ -735,9 +799,9 @@ void ManageBaskets()
          g_baskets[b].profitLockApplied = true;
         }
 
-      // Trailing only starts once LEVEL 2 has banked its partial and taken
-      // the fixed TP away - from here the stop can only move forward, so the
-      // basket's worst case never gets worse again.
+      // Trailing only starts once LEVEL 2 has handed the basket over and
+      // taken the fixed TP away - from here the stop can only move forward,
+      // so the basket's worst case never gets worse again.
       if(InpUseTrailing && g_baskets[b].partialDone)
          TrailBasketByPeak(g_baskets[b], stopsLevel);
      }
