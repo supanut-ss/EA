@@ -57,6 +57,17 @@
 //|      enough to be worth protecting but too choppy/slow for the    |
 //|      per-tick trailing to have triggered smoothly. Never moves SL |
 //|      backward - only used if it improves on the current SL.       |
+//|   6) Stepped profit-lock ladder (InpUseProfitLadder, ON by        |
+//|      default): same mechanism as #5, but it keeps firing forever   |
+//|      instead of once. The first trigger is InpLadderStart (default |
+//|      6000 = 6.00); each level locks (trigger - InpLadderLockOffset,|
+//|      default 3000 = 3.00) points of profit, then the NEXT trigger  |
+//|      is this one plus InpLadderStepA/InpLadderStepB (default       |
+//|      2000/1000), alternating every level - so with defaults the    |
+//|      sequence runs 6000->lock 3000, 8000->5000, 9000->6000,        |
+//|      11000->8000, 12000->9000, 14000->11000, 15000->12000,         |
+//|      17000->14000, 18000->15000, 20000->17000, ... with no upper   |
+//|      bound. Runs alongside #5, independently.                      |
 //|                                                                    |
 //|  Multiple manual entries (opposite directions, or spaced apart in |
 //|  time) are tracked as independent baskets, each anchored to its   |
@@ -86,6 +97,7 @@
 CTrade trade;
 
 #define MAX_BASKET_POSITIONS 32   // hard cap on positions tracked per basket (1 manual + auto adds)
+#define LADDER_MAX_LEVELS_PER_TICK 1000  // safety cap - only reachable with a misconfigured (near-zero) ladder step
 
 //================= INPUTS ====================================
 
@@ -125,6 +137,13 @@ input bool     InpUseProfitLock           = false; // Enable: lock in a fixed pr
 input int      InpProfitLockTriggerPoints = 12500; // Once basket profit reaches this many points, lock SL as below (fires once per basket)
 input int      InpProfitLockPoints        = 10000; // Points of profit (from each order's own open price) to lock into SL when the trigger fires
 
+input group "=== Stepped Profit-Lock Ladder (fires repeatedly forever, locks forward as profit climbs) ==="
+input bool     InpUseProfitLadder    = true;   // Enable the ladder below, independent of the single Extra Profit Lock above
+input int      InpLadderStart        = 6000;   // First trigger (points of basket profit; 6000 = 6.00 on 3-decimal gold, same scale as the other inputs above)
+input int      InpLadderLockOffset   = 3000;   // Every level locks (its trigger - this many points) into each order's SL
+input int      InpLadderStepA        = 2000;   // Step added to get the next trigger, alternating with StepB starting from the first level
+input int      InpLadderStepB        = 1000;   // The other alternating step (defaults give 6000,8000,9000,11000,12000,14000,15000,17000,18000,20000,... forever)
+
 input group "=== Order Execution ==="
 input ulong    InpMagicNumber        = 20260827; // Magic Number tagged on EA-opened (auto) orders only - the manual trigger keeps Magic=0
 input int      InpSlippagePoints     = 500;      // Max price deviation allowed on auto market orders (500 = 0.50 on 3-decimal gold; the old 50 was 0.05, tighter than a normal gold spread)
@@ -154,6 +173,13 @@ struct Basket
    ulong    forceBeTickets[MAX_BASKET_POSITIONS];
    int      forceBeTicketCount;
    double   forceBeFloorPrice;
+
+   // Stepped profit-lock ladder cursor - the next un-fired trigger (points)
+   // and which of InpLadderStepA/StepB gets added to it once it fires, to
+   // produce the trigger after that. Starts at InpLadderStart/StepA and
+   // walks forward with no upper bound (see ManageBaskets).
+   double   ladderNextTrigger;
+   bool     ladderNextIsStepA;
   };
 Basket g_baskets[];
 
@@ -214,6 +240,25 @@ int OnInit()
       Print("AutoMultiplier: WARNING - InpProfitLockPoints=", InpProfitLockPoints,
             " is larger than InpProfitLockTriggerPoints=", InpProfitLockTriggerPoints,
             " - the lock level won't be reachable yet when the trigger fires, so it will be skipped");
+
+   if(InpUseProfitLadder)
+     {
+      if(InpLadderLockOffset <= 0 || InpLadderLockOffset >= InpLadderStart)
+         Print("AutoMultiplier: WARNING - InpLadderLockOffset=", InpLadderLockOffset,
+               " must be positive and below InpLadderStart=", InpLadderStart,
+               " - the first level's SL would land at or past the price that triggers it and be rejected");
+
+      if(InpLadderStepA <= 0 || InpLadderStepB <= 0)
+         Print("AutoMultiplier: WARNING - InpLadderStepA/StepB must both be positive or the ladder cannot ",
+               "advance - it will stall after the first level and re-fire nothing (capped at ",
+               LADDER_MAX_LEVELS_PER_TICK, " levels/tick either way)");
+
+      Print("AutoMultiplier: profit-lock ladder enabled - starts at ", InpLadderStart,
+            ", locks (trigger - ", InpLadderLockOffset, "), steps alternate +", InpLadderStepA,
+            "/+", InpLadderStepB, " forever (e.g. ", InpLadderStart, "->",
+            InpLadderStart - InpLadderLockOffset, ", ", InpLadderStart + InpLadderStepA, "->",
+            InpLadderStart + InpLadderStepA - InpLadderLockOffset, ", ...)");
+     }
 
    // The single most confusing thing about this EA is that a "point" is not
    // the same size on every broker - spell out what each distance actually
@@ -441,6 +486,8 @@ void TryCreateBasketFromManualPosition(ulong positionId)
    g_baskets[bi].ticketCount       = 0;
    g_baskets[bi].forceBeTicketCount = 0;
    g_baskets[bi].forceBeFloorPrice  = 0.0;
+   g_baskets[bi].ladderNextTrigger  = InpLadderStart;
+   g_baskets[bi].ladderNextIsStepA  = true;
    AddTicketToBasket(g_baskets[bi], positionId);
 
    Print("AutoMultiplier: manual ", (direction == 1 ? "BUY" : "SELL"), " #", positionId,
@@ -595,16 +642,21 @@ void HandOverToTrailing(Basket &bk, double stopsLevel)
 
 //+------------------------------------------------------------------+
 //| One-time safety net, independent of the step trailing above: once |
-//| basket profit reaches InpProfitLockTriggerPoints, pull SL forward |
-//| to lock in InpProfitLockPoints of profit on every order (measured |
-//| from that order's own open price) - for a market that runs far    |
-//| enough to be worth protecting, but not smoothly enough for the     |
-//| per-tick trailing above to have kept pace via the TP-proximity     |
-//| check. Never moves SL backward - only applied if it actually       |
-//| improves on whatever SL that order already has (e.g. from          |
-//| breakeven or trailing already having done better).                 |
+//| basket profit reaches a trigger, pull SL forward to lock in        |
+//| lockPoints of profit on every order (measured from that order's    |
+//| own open price) - for a market that runs far enough to be worth    |
+//| protecting, but not smoothly enough for the per-tick trailing       |
+//| above to have kept pace via the TP-proximity check. Never moves SL |
+//| backward - only applied if it actually improves on whatever SL     |
+//| that order already has (e.g. from breakeven or trailing already    |
+//| having done better).                                                |
+//|                                                                     |
+//| Shared by the single Extra Profit Lock (InpProfitLockPoints) and    |
+//| every level of the stepped ladder below - both are once-off        |
+//| triggers that lock a fixed number of points, they just differ in    |
+//| how many levels and at what trigger.                                |
 //+------------------------------------------------------------------+
-void ApplyProfitLockToBasket(Basket &bk, double stopsLevel)
+void ApplyProfitLockToBasket(Basket &bk, double lockPoints, double stopsLevel)
   {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -617,8 +669,8 @@ void ApplyProfitLockToBasket(Basket &bk, double stopsLevel)
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double curSL     = PositionGetDouble(POSITION_SL);
       double curTP     = PositionGetDouble(POSITION_TP);
-      double lockSL    = (bk.direction == 1) ? openPrice + InpProfitLockPoints * _Point
-                                              : openPrice - InpProfitLockPoints * _Point;
+      double lockSL    = (bk.direction == 1) ? openPrice + lockPoints * _Point
+                                              : openPrice - lockPoints * _Point;
       lockSL = NormalizeDouble(lockSL, _Digits);
 
       bool improves = (bk.direction == 1) ? (curSL <= 0 || lockSL > curSL) : (curSL <= 0 || lockSL < curSL);
@@ -795,8 +847,33 @@ void ManageBaskets()
 
       if(InpUseProfitLock && !g_baskets[b].profitLockApplied && profitPoints >= InpProfitLockTriggerPoints)
         {
-         ApplyProfitLockToBasket(g_baskets[b], stopsLevel);
+         ApplyProfitLockToBasket(g_baskets[b], InpProfitLockPoints, stopsLevel);
          g_baskets[b].profitLockApplied = true;
+        }
+
+      // Stepped profit-lock ladder - independent of, and in addition to, the
+      // single Extra Profit Lock above. Has no fixed end: each fired level
+      // computes the next trigger by adding InpLadderStepA/StepB
+      // (alternating) to the one that just fired, so the `while` below walks
+      // forward through as many levels as this tick's profit has already
+      // cleared (a fast tick jump can clear more than one at once) and keeps
+      // going on every later tick for as long as profit keeps climbing.
+      // LADDER_MAX_LEVELS_PER_TICK guards against an infinite loop if
+      // InpLadderStepA/StepB are misconfigured to zero or negative.
+      if(InpUseProfitLadder)
+        {
+         int guard = 0;
+         while(profitPoints >= g_baskets[b].ladderNextTrigger && guard < LADDER_MAX_LEVELS_PER_TICK)
+           {
+            double lockPoints = g_baskets[b].ladderNextTrigger - InpLadderLockOffset;
+            ApplyProfitLockToBasket(g_baskets[b], lockPoints, stopsLevel);
+
+            double step = g_baskets[b].ladderNextIsStepA ? InpLadderStepA : InpLadderStepB;
+            if(step <= 0) break; // misconfigured - stop advancing instead of looping forever
+            g_baskets[b].ladderNextTrigger += step;
+            g_baskets[b].ladderNextIsStepA  = !g_baskets[b].ladderNextIsStepA;
+            guard++;
+           }
         }
 
       // Trailing only starts once LEVEL 2 has handed the basket over and
