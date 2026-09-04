@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.10"
+#property version   "1.12"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -17,8 +17,7 @@ CTrade trade;
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
 input double   InpPriceStep            = 1.0;     // Direct price distance; 1.0 means 4000 -> 4001 -> 4002
-input double   InpLotMultiplier        = 2.0;     // Lot multiplier between consecutive opening levels
-input double   InpOppositeFirstFactor  = 1.0;     // Opposite level 1 lot = manual lot * this factor
+input double   InpLotFactorStep        = 2.0;     // Factor increment per level; 2.0 gives 1x, 3x, 5x, 7x, 9x
 
 input group "=== Optional SL / TP (price distance) ==="
 input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distance from each pending entry price
@@ -27,6 +26,7 @@ input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distan
 input group "=== Formula Portfolio Close ==="
 input bool     InpUseFormulaClose       = true;    // Close basket when winning side count reaches 2k+1
 input double   InpCloseMinProfitMoney   = 0.0;     // Basket floating profit must be greater than this amount
+input double   InpMinWinnerProfitEach   = 1.0;     // Every position on the winning side must be strictly above this profit
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
@@ -54,10 +54,11 @@ CloseBasket g_closeBaskets[];
 int OnInit()
   {
    if(InpOrdersPerSide < 1 || InpOrdersPerSide > MAX_GRID_LEVELS_PER_SIDE ||
-      InpPriceStep <= 0.0 || InpLotMultiplier <= 0.0 ||
-      InpOppositeFirstFactor <= 0.0 || InpMaxOwnPendingOrders < 1 ||
+      InpPriceStep <= 0.0 || InpLotFactorStep <= 0.0 ||
+      InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
-      InpCloseMinProfitMoney < 0.0 || InpExpirationHours < 0)
+      InpCloseMinProfitMoney < 0.0 || InpMinWinnerProfitEach < 0.0 ||
+      InpExpirationHours < 0)
      {
       Print("OneClickGrid: invalid input parameters");
       return(INIT_PARAMETERS_INCORRECT);
@@ -92,7 +93,7 @@ int OnInit()
    Print("OneClickGrid: ready on ", _Symbol,
          " | opening levels/side=", InpOrdersPerSide,
          " | step=", DoubleToString(InpPriceStep, _Digits),
-         " | opening multiplier=", DoubleToString(InpLotMultiplier, 2));
+         " | lot factors=1x,+", DoubleToString(InpLotFactorStep, 2), "x per level");
    return(INIT_SUCCEEDED);
   }
 
@@ -182,29 +183,35 @@ void ProcessManualEntryDeal(const ulong dealTicket)
 
    int placed = 0;
 
-   // The manual position is level 1 on its own side. Levels 2..N retain
-   // the original opening rule and multiply by 1:2 with default inputs.
+   // The manual position is level 1. With factor step 2, levels use the
+   // odd-number sequence 1x, 3x, 5x, 7x, 9x on both sides.
    for(int level=2; level<=InpOrdersPerSide; level++)
      {
       double price = manualPrice + direction * (level - 1) * InpPriceStep;
-      double lot   = manualLot * MathPow(InpLotMultiplier, level - 1);
+      double lot   = manualLot * LotFactorForLevel(level);
       if(PlaceStopOrder(direction, level, manualOrderTicket, price, lot))
          placed++;
      }
 
-   // The opposite side also retains the original fixed opening count and
-   // restarts its own lot sequence from the configured first-lot factor.
+   // The opposite side keeps the same fixed opening count and restarts the
+   // odd-number lot sequence from 1x at its own first pending level.
    int oppositeDirection = -direction;
    for(int level=1; level<=InpOrdersPerSide; level++)
      {
       double price = manualPrice + oppositeDirection * level * InpPriceStep;
-      double lot   = manualLot * InpOppositeFirstFactor * MathPow(InpLotMultiplier, level - 1);
+      double lot   = manualLot * LotFactorForLevel(level);
       if(PlaceStopOrder(oppositeDirection, level, manualOrderTicket, price, lot))
          placed++;
      }
 
    Print("OneClickGrid: manual order #", manualOrderTicket,
          " created ", placed, "/", requiredPending, " opening pending orders");
+  }
+
+//+------------------------------------------------------------------+
+double LotFactorForLevel(const int level)
+  {
+   return(1.0 + (level - 1) * InpLotFactorStep);
   }
 
 //+------------------------------------------------------------------+
@@ -530,13 +537,17 @@ void GetBasketStats(const CloseBasket &basket,
                     int &sellCount,
                     double &buyProfit,
                     double &sellProfit,
-                    double &netProfit)
+                    double &netProfit,
+                    bool &allBuysAboveMinimum,
+                    bool &allSellsAboveMinimum)
   {
    buyCount = 0;
    sellCount = 0;
    buyProfit = 0.0;
    sellProfit = 0.0;
    netProfit = 0.0;
+   allBuysAboveMinimum = true;
+   allSellsAboveMinimum = true;
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -550,11 +561,15 @@ void GetBasketStats(const CloseBasket &basket,
         {
          buyCount++;
          buyProfit += profit;
+         if(profit <= InpMinWinnerProfitEach)
+            allBuysAboveMinimum = false;
         }
       else if(type == POSITION_TYPE_SELL)
         {
          sellCount++;
          sellProfit += profit;
+         if(profit <= InpMinWinnerProfitEach)
+            allSellsAboveMinimum = false;
         }
       netProfit += profit;
      }
@@ -622,17 +637,20 @@ void ManageFormulaClose()
 
       int buyCount, sellCount;
       double buyProfit, sellProfit, netProfit;
-      GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit);
+      bool allBuysAboveMinimum, allSellsAboveMinimum;
+      GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
+                     allBuysAboveMinimum, allSellsAboveMinimum);
 
       bool buyRecovery = (sellCount > 0 && sellProfit < 0.0 && buyProfit > 0.0 &&
-                          buyCount >= 2 * sellCount + 1);
+                          buyCount >= 2 * sellCount + 1 && allBuysAboveMinimum);
       bool sellRecovery = (buyCount > 0 && buyProfit < 0.0 && sellProfit > 0.0 &&
-                           sellCount >= 2 * buyCount + 1);
+                           sellCount >= 2 * buyCount + 1 && allSellsAboveMinimum);
 
       if((buyRecovery || sellRecovery) && netProfit > InpCloseMinProfitMoney)
         {
          Print("OneClickGrid: formula close triggered for basket #", g_closeBaskets[b].rootOrderTicket,
                " | Buy=", buyCount, " Sell=", sellCount,
+               " | every winner > ", DoubleToString(InpMinWinnerProfitEach, 2),
                " | net=", DoubleToString(netProfit, 2));
          g_closeBaskets[b].closing = true;
          CloseBasketNow(g_closeBaskets[b]);
