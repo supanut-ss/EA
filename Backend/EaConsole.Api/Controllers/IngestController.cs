@@ -25,8 +25,20 @@ public class IngestController(IIngestService ingestService) : ControllerBase
     [HttpPost("trade")]
     public async Task<IActionResult> IngestTrade([FromBody] TradeIngestRequest request, CancellationToken ct)
     {
-        await ingestService.IngestTradeAsync(request, ct);
-        return Accepted();
+        var result = await ingestService.IngestTradeAsync(request, ct);
+        return result switch
+        {
+            TradeIngestResult.Accepted => Accepted(),
+            TradeIngestResult.InvalidOwner => BadRequest(new
+            {
+                message = $"EA {request.EaId} is not registered under account {request.AccountId}."
+            }),
+            TradeIngestResult.OwnershipConflict => Conflict(new
+            {
+                message = $"Ticket {request.Mt5Ticket} is already owned by another EA."
+            }),
+            _ => StatusCode(StatusCodes.Status500InternalServerError),
+        };
     }
 
     [HttpPost("log")]

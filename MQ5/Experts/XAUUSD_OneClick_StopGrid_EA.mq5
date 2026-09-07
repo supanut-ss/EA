@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.12"
+#property version   "1.21"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -13,10 +13,11 @@ CTrade trade;
 
 #define MAX_PROCESSED_MANUAL_ORDERS 256
 #define MAX_GRID_LEVELS_PER_SIDE    32
+#define MAX_TRACKED_BASKETS         64
 
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
-input double   InpPriceStep            = 1.0;     // Direct price distance; 1.0 means 4000 -> 4001 -> 4002
+input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
 input double   InpLotFactorStep        = 2.0;     // Factor increment per level; 2.0 gives 1x, 3x, 5x, 7x, 9x
 
 input group "=== Optional SL / TP (price distance) ==="
@@ -24,9 +25,10 @@ input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distan
 input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distance from each pending entry price
 
 input group "=== Formula Portfolio Close ==="
-input bool     InpUseFormulaClose       = true;    // Close basket when winning side count reaches 2k+1
-input double   InpCloseMinProfitMoney   = 0.0;     // Basket floating profit must be greater than this amount
-input double   InpMinWinnerProfitEach   = 1.0;     // Every position on the winning side must be strictly above this profit
+input bool     InpUseFormulaClose       = true;    // Arm basket BE protection when winning side qualifies
+input double   InpCloseMinProfitMoney   = 0.0;     // Basket floating profit must be greater than this amount before arming
+input double   InpBEPriceDistance       = 1.0;     // Direct price distance from the last winner; 4000 + 1 = 4001
+input int      InpConsecutiveWinners    = 3;       // Qualifying same-side winners required; 0 = use only 2k+1 formula
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
@@ -41,12 +43,16 @@ double g_tickSize = 0.0;
 double g_volumeMin = 0.0;
 double g_volumeMax = 0.0;
 double g_volumeStep = 0.0;
+string g_statePrefix = "";
 
 struct CloseBasket
   {
    ulong rootOrderTicket;
    ulong manualPositionId;
-   bool  closing;
+   bool  protectionArmed;
+   int   protectionDirection;
+   double protectionPrice;
+   datetime startTime;
   };
 CloseBasket g_closeBaskets[];
 
@@ -54,10 +60,11 @@ CloseBasket g_closeBaskets[];
 int OnInit()
   {
    if(InpOrdersPerSide < 1 || InpOrdersPerSide > MAX_GRID_LEVELS_PER_SIDE ||
-      InpPriceStep <= 0.0 || InpLotFactorStep <= 0.0 ||
+      InpPriceStepCents <= 0 || InpLotFactorStep <= 0.0 ||
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
-      InpCloseMinProfitMoney < 0.0 || InpMinWinnerProfitEach < 0.0 ||
+      InpCloseMinProfitMoney < 0.0 || InpBEPriceDistance <= 0.0 ||
+      InpConsecutiveWinners < 0 ||
       InpExpirationHours < 0)
      {
       Print("OneClickGrid: invalid input parameters");
@@ -74,7 +81,7 @@ int OnInit()
      }
 
    if(InpStopLossDistance <= 0.0)
-      Print("OneClickGrid: WARNING - Stop Loss is disabled. Formula-based recovery sizing can create very large unbounded exposure.");
+      Print("OneClickGrid: WARNING - per-position Stop Loss is disabled and there is no automatic maximum-loss protection.");
 
    long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
    if(marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
@@ -88,12 +95,22 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetAsyncMode(false);
 
+   g_statePrefix = BuildStatePrefix();
+   LoadPersistentBaskets();
    RebuildCloseBaskets();
+   CleanLegacyRiskState();
+   SavePersistentState();
 
    Print("OneClickGrid: ready on ", _Symbol,
          " | opening levels/side=", InpOrdersPerSide,
-         " | step=", DoubleToString(InpPriceStep, _Digits),
+         " | step=", DoubleToString(GridStepPrice(), _Digits),
+         " (", InpPriceStepCents, " cents)",
          " | lot factors=1x,+", DoubleToString(InpLotFactorStep, 2), "x per level");
+   Print("OneClickGrid: basket BE protection requires every winning position to move > ",
+         DoubleToString(MinWinnerMovePrice(), _Digits),
+         " in direct price distance from its entry");
+   if(InpConsecutiveWinners > 0)
+      Print("OneClickGrid: consecutive-winner protection shortcut = ", InpConsecutiveWinners, " positions");
    return(INIT_SUCCEEDED);
   }
 
@@ -111,8 +128,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   PruneClosedBaskets();
    if(InpUseFormulaClose)
       ManageFormulaClose();
+  }
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(g_statePrefix != "")
+      SavePersistentState();
   }
 
 //+------------------------------------------------------------------+
@@ -144,6 +169,7 @@ void ProcessManualEntryDeal(const ulong dealTicket)
    double manualPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
    double manualLot   = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
    ulong manualPositionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+   datetime manualTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
    int direction     = (dealType == DEAL_TYPE_BUY) ? 1 : -1;
 
    if(manualPrice <= 0.0 || manualLot <= 0.0)
@@ -151,6 +177,15 @@ void ProcessManualEntryDeal(const ulong dealTicket)
       Print("OneClickGrid: invalid manual deal data for #", dealTicket);
       return;
      }
+
+   if(manualPositionId == 0 ||
+      !AddCloseBasket(manualOrderTicket, manualPositionId, manualTime))
+     {
+      Print("OneClickGrid: cannot adopt manual order #", manualOrderTicket,
+            " safely; it remains user-owned and no grid will be created");
+      return;
+     }
+   SavePersistentState();
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -179,15 +214,13 @@ void ProcessManualEntryDeal(const ulong dealTicket)
       return;
      }
 
-   AddCloseBasket(manualOrderTicket, manualPositionId);
-
    int placed = 0;
 
    // The manual position is level 1. With factor step 2, levels use the
    // odd-number sequence 1x, 3x, 5x, 7x, 9x on both sides.
    for(int level=2; level<=InpOrdersPerSide; level++)
      {
-      double price = manualPrice + direction * (level - 1) * InpPriceStep;
+      double price = manualPrice + direction * (level - 1) * GridStepPrice();
       double lot   = manualLot * LotFactorForLevel(level);
       if(PlaceStopOrder(direction, level, manualOrderTicket, price, lot))
          placed++;
@@ -198,7 +231,7 @@ void ProcessManualEntryDeal(const ulong dealTicket)
    int oppositeDirection = -direction;
    for(int level=1; level<=InpOrdersPerSide; level++)
      {
-      double price = manualPrice + oppositeDirection * level * InpPriceStep;
+      double price = manualPrice + oppositeDirection * level * GridStepPrice();
       double lot   = manualLot * LotFactorForLevel(level);
       if(PlaceStopOrder(oppositeDirection, level, manualOrderTicket, price, lot))
          placed++;
@@ -212,6 +245,22 @@ void ProcessManualEntryDeal(const ulong dealTicket)
 double LotFactorForLevel(const int level)
   {
    return(1.0 + (level - 1) * InpLotFactorStep);
+  }
+
+//+------------------------------------------------------------------+
+double GridStepPrice()
+  {
+   // Grid units are price cents, deliberately independent of broker
+   // _Point. Thus 200 always means a 2.000 XAUUSD price distance.
+   return(InpPriceStepCents / 100.0);
+  }
+
+//+------------------------------------------------------------------+
+double MinWinnerMovePrice()
+  {
+   // This distance is a direct quote-price value. It deliberately does not
+   // use broker _Point: 1.0 means 4000 -> 4001, exactly as configured.
+   return(InpBEPriceDistance);
   }
 
 //+------------------------------------------------------------------+
@@ -422,18 +471,28 @@ string BasketTag(const ulong rootOrderTicket)
 //+------------------------------------------------------------------+
 bool CommentMatchesBasket(const string comment, const ulong rootOrderTicket)
   {
-   return(StringFind(comment, BasketTag(rootOrderTicket)) == 0);
+   return(comment == BasketTag(rootOrderTicket));
   }
 
 //+------------------------------------------------------------------+
 ulong RootTicketFromComment(const string comment)
   {
-   if(StringFind(comment, "G#") != 0)
+   if(StringLen(comment) <= 2 || StringSubstr(comment, 0, 2) != "G#")
       return(0);
 
-   string value = StringSubstr(comment, 2);
-   long parsed = StringToInteger(value);
-   return(parsed > 0 ? (ulong)parsed : 0);
+   ulong parsed = 0;
+   ulong maxValue = ~((ulong)0);
+   for(int i=2; i<StringLen(comment); i++)
+     {
+      ushort ch = StringGetCharacter(comment, i);
+      if(ch < '0' || ch > '9')
+         return(0);
+      ulong digit = (ulong)(ch - '0');
+      if(parsed > (maxValue - digit) / 10)
+         return(0);
+      parsed = parsed * 10 + digit;
+     }
+   return(parsed);
   }
 
 //+------------------------------------------------------------------+
@@ -446,21 +505,35 @@ int FindCloseBasket(const ulong rootOrderTicket)
   }
 
 //+------------------------------------------------------------------+
-void AddCloseBasket(const ulong rootOrderTicket, const ulong manualPositionId)
+bool AddCloseBasket(const ulong rootOrderTicket,
+                    const ulong manualPositionId,
+                    const datetime startTime)
   {
    int index = FindCloseBasket(rootOrderTicket);
    if(index >= 0)
      {
       if(g_closeBaskets[index].manualPositionId == 0)
          g_closeBaskets[index].manualPositionId = manualPositionId;
-      return;
+      if(g_closeBaskets[index].startTime == 0)
+         g_closeBaskets[index].startTime = startTime;
+      return(true);
      }
 
    int size = ArraySize(g_closeBaskets);
+   if(size >= MAX_TRACKED_BASKETS)
+     {
+      Print("OneClickGrid: managed basket capacity reached; root #", rootOrderTicket,
+            " was not adopted");
+      return(false);
+     }
    ArrayResize(g_closeBaskets, size + 1);
    g_closeBaskets[size].rootOrderTicket = rootOrderTicket;
    g_closeBaskets[size].manualPositionId = manualPositionId;
-   g_closeBaskets[size].closing = false;
+   g_closeBaskets[size].protectionArmed = false;
+   g_closeBaskets[size].protectionDirection = 0;
+   g_closeBaskets[size].protectionPrice = 0.0;
+   g_closeBaskets[size].startTime = startTime;
+   return(true);
   }
 
 //+------------------------------------------------------------------+
@@ -474,8 +547,6 @@ ulong ManualPositionIdFromHistory(const ulong rootOrderTicket)
 //+------------------------------------------------------------------+
 void RebuildCloseBaskets()
   {
-   ArrayResize(g_closeBaskets, 0);
-
    for(int i=OrdersTotal()-1; i>=0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -485,7 +556,15 @@ void RebuildCloseBaskets()
 
       ulong root = RootTicketFromComment(OrderGetString(ORDER_COMMENT));
       if(root > 0)
-         AddCloseBasket(root, ManualPositionIdFromHistory(root));
+        {
+         ulong manualId = ManualPositionIdFromHistory(root);
+         datetime startTime = (datetime)HistoryOrderGetInteger(root, ORDER_TIME_SETUP);
+         bool discovered = (FindCloseBasket(root) < 0);
+         AddCloseBasket(root, manualId, startTime);
+         if(discovered)
+            Print("OneClickGrid: discovered basket #", root,
+                  " from tagged terminal state");
+        }
      }
 
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -497,14 +576,22 @@ void RebuildCloseBaskets()
 
       ulong root = RootTicketFromComment(PositionGetString(POSITION_COMMENT));
       if(root > 0)
-         AddCloseBasket(root, ManualPositionIdFromHistory(root));
+        {
+         ulong manualId = ManualPositionIdFromHistory(root);
+         datetime startTime = (datetime)HistoryOrderGetInteger(root, ORDER_TIME_SETUP);
+         bool discovered = (FindCloseBasket(root) < 0);
+         AddCloseBasket(root, manualId, startTime);
+         if(discovered)
+            Print("OneClickGrid: discovered basket #", root,
+                  " from tagged terminal state");
+        }
      }
 
    for(int i=0; i<ArraySize(g_closeBaskets); i++)
       RememberManualOrder(g_closeBaskets[i].rootOrderTicket);
 
    if(ArraySize(g_closeBaskets) > 0)
-      Print("OneClickGrid: rebuilt ", ArraySize(g_closeBaskets), " formula-close basket(s) from terminal state");
+      Print("OneClickGrid: restored ", ArraySize(g_closeBaskets), " managed basket(s)");
   }
 
 //+------------------------------------------------------------------+
@@ -532,22 +619,235 @@ bool OrderBelongsToBasket(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
+uint StateScopeHash()
+  {
+   string scope = StringFormat("%I64u|%I64u|%s|%s",
+                               (ulong)AccountInfoInteger(ACCOUNT_LOGIN),
+                               InpMagicNumber, _Symbol,
+                               AccountInfoString(ACCOUNT_SERVER));
+   uint hash = 2166136261;
+   for(int i=0; i<StringLen(scope); i++)
+     {
+      hash ^= (uint)StringGetCharacter(scope, i);
+      hash *= 16777619;
+     }
+   return(hash);
+  }
+
+//+------------------------------------------------------------------+
+string BuildStatePrefix()
+  {
+   return("OCSG." + StringFormat("%08X", StateScopeHash()));
+  }
+
+//+------------------------------------------------------------------+
+string BasketStateKey(const int index, const string field)
+  {
+   return(g_statePrefix + ".B" + IntegerToString(index) + field);
+  }
+
+//+------------------------------------------------------------------+
+bool ReadStateValue(const string key, double &value)
+  {
+   return(GlobalVariableGet(key, value));
+  }
+
+//+------------------------------------------------------------------+
+void WriteStateValue(const string key, const double value)
+  {
+   if(GlobalVariableSet(key, value) == 0)
+      Print("OneClickGrid: persistent state write failed for ", key,
+            " | error=", GetLastError());
+  }
+
+//+------------------------------------------------------------------+
+void WriteStateUlong(const string keyBase, const ulong value)
+  {
+   uint low = (uint)(value & 0xFFFFFFFF);
+   uint high = (uint)(value >> 32);
+   WriteStateValue(keyBase + "H", (double)high);
+   WriteStateValue(keyBase + "L", (double)low);
+  }
+
+//+------------------------------------------------------------------+
+bool ReadStateUlong(const string keyBase, ulong &value)
+  {
+   double highValue, lowValue;
+   if(!ReadStateValue(keyBase + "H", highValue) ||
+      !ReadStateValue(keyBase + "L", lowValue))
+      return(false);
+
+   uint high = (uint)MathRound(highValue);
+   uint low = (uint)MathRound(lowValue);
+   value = ((ulong)high << 32) | (ulong)low;
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void DeleteBasketStateSlot(const int index)
+  {
+   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P"};
+   for(int i=0; i<ArraySize(fields); i++)
+      GlobalVariableDel(BasketStateKey(index, fields[i]));
+  }
+
+//+------------------------------------------------------------------+
+void SavePersistentState()
+  {
+   if(g_statePrefix == "")
+      return;
+
+   double oldBasketCountValue = 0.0;
+   int oldBasketCount = ReadStateValue(g_statePrefix + ".BC", oldBasketCountValue)
+      ? (int)MathRound(oldBasketCountValue) : 0;
+   int basketCount = (int)MathMin(ArraySize(g_closeBaskets), MAX_TRACKED_BASKETS);
+
+   for(int i=0; i<basketCount; i++)
+     {
+      WriteStateUlong(BasketStateKey(i, "R"), g_closeBaskets[i].rootOrderTicket);
+      WriteStateUlong(BasketStateKey(i, "M"), g_closeBaskets[i].manualPositionId);
+      WriteStateValue(BasketStateKey(i, "T"), (double)g_closeBaskets[i].startTime);
+      WriteStateValue(BasketStateKey(i, "A"), g_closeBaskets[i].protectionArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "D"), (double)g_closeBaskets[i].protectionDirection);
+      WriteStateValue(BasketStateKey(i, "P"), g_closeBaskets[i].protectionPrice);
+     }
+   for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
+      DeleteBasketStateSlot(i);
+
+   WriteStateValue(g_statePrefix + ".BC", (double)basketCount);
+   WriteStateValue(g_statePrefix + ".V", 3.0);
+   GlobalVariablesFlush();
+  }
+
+//+------------------------------------------------------------------+
+void LoadPersistentBaskets()
+  {
+   ArrayResize(g_closeBaskets, 0);
+   double versionValue, countValue;
+   if(!ReadStateValue(g_statePrefix + ".V", versionValue) ||
+      !ReadStateValue(g_statePrefix + ".BC", countValue))
+      return;
+
+   int stateVersion = (int)MathRound(versionValue);
+   if(stateVersion < 1 || stateVersion > 3)
+      return;
+
+   int count = (int)MathRound(countValue);
+   if(count < 0 || count > MAX_TRACKED_BASKETS)
+     {
+      Print("OneClickGrid: saved basket state count is invalid; terminal state discovery will be used");
+      return;
+     }
+
+   for(int i=0; i<count; i++)
+     {
+      ulong root, manualId;
+      double timeValue;
+      if(!ReadStateUlong(BasketStateKey(i, "R"), root) || root == 0 ||
+         !ReadStateUlong(BasketStateKey(i, "M"), manualId) ||
+         !ReadStateValue(BasketStateKey(i, "T"), timeValue))
+        {
+         Print("OneClickGrid: skipped incomplete saved basket slot ", i);
+         continue;
+        }
+
+      if(!AddCloseBasket(root, manualId, (datetime)MathRound(timeValue)))
+         break;
+
+      int index = FindCloseBasket(root);
+      if(stateVersion < 3)
+        {
+         double legacyLiquidation = 0.0;
+         if(ReadStateValue(BasketStateKey(i, "Q"), legacyLiquidation) &&
+            legacyLiquidation > 0.5)
+            Print("OneClickGrid: ignored legacy loss-liquidation state #", root,
+                  "; v1.21 has no automatic loss closure");
+        }
+
+      double armedValue, directionValue, priceValue;
+      bool protectionComplete = (index >= 0 &&
+         ReadStateValue(BasketStateKey(i, "A"), armedValue) &&
+         ReadStateValue(BasketStateKey(i, "D"), directionValue) &&
+         ReadStateValue(BasketStateKey(i, "P"), priceValue));
+      int savedDirection = protectionComplete ? (int)MathRound(directionValue) : 0;
+      if(protectionComplete && armedValue > 0.5 &&
+         (savedDirection == 1 || savedDirection == -1) && priceValue > 0.0)
+        {
+         g_closeBaskets[index].protectionArmed = true;
+         g_closeBaskets[index].protectionDirection = savedDirection;
+         g_closeBaskets[index].protectionPrice = priceValue;
+         Print("OneClickGrid: restored formula protection latch #", root,
+               " | direction=", savedDirection,
+               " | price=", DoubleToString(priceValue, _Digits));
+        }
+      else if(protectionComplete && armedValue > 0.5)
+         Print("OneClickGrid: discarded incomplete formula protection state #", root);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CleanLegacyRiskState()
+  {
+   for(int i=0; i<MAX_TRACKED_BASKETS; i++)
+     {
+      GlobalVariableDel(BasketStateKey(i, "E"));
+      GlobalVariableDel(BasketStateKey(i, "L"));
+      GlobalVariableDel(BasketStateKey(i, "Q"));
+     }
+
+   double manualCountValue = 0.0;
+   int manualCount = ReadStateValue(g_statePrefix + ".MC", manualCountValue)
+      ? (int)MathMin(MathMax(MathRound(manualCountValue), 0.0), 256.0) : 0;
+   for(int i=0; i<manualCount; i++)
+     {
+      GlobalVariableDel(g_statePrefix + ".M" + IntegerToString(i) + "H");
+      GlobalVariableDel(g_statePrefix + ".M" + IntegerToString(i) + "L");
+     }
+
+   string dailyFields[] = {"DD","DT","DO","DW","DXH","DXL","DE","DF","DL","DQ","MC"};
+   for(int i=0; i<ArraySize(dailyFields); i++)
+      GlobalVariableDel(g_statePrefix + "." + dailyFields[i]);
+  }
+
+//+------------------------------------------------------------------+
+void PruneClosedBaskets()
+  {
+   bool changed = false;
+   for(int i=ArraySize(g_closeBaskets)-1; i>=0; i--)
+      if(!BasketHasOpenState(g_closeBaskets[i]))
+        {
+         ArrayRemove(g_closeBaskets, i, 1);
+         changed = true;
+        }
+   if(changed)
+      SavePersistentState();
+  }
+
+//+------------------------------------------------------------------+
 void GetBasketStats(const CloseBasket &basket,
                     int &buyCount,
                     int &sellCount,
                     double &buyProfit,
                     double &sellProfit,
                     double &netProfit,
-                    bool &allBuysAboveMinimum,
-                    bool &allSellsAboveMinimum)
+                    bool &allBuysAboveMinimumMove,
+                    bool &allSellsAboveMinimumMove,
+                    int &qualifiedBuyCount,
+                    int &qualifiedSellCount)
   {
    buyCount = 0;
    sellCount = 0;
    buyProfit = 0.0;
    sellProfit = 0.0;
    netProfit = 0.0;
-   allBuysAboveMinimum = true;
-   allSellsAboveMinimum = true;
+   allBuysAboveMinimumMove = true;
+   allSellsAboveMinimumMove = true;
+   qualifiedBuyCount = 0;
+   qualifiedSellCount = 0;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double requiredMove = MinWinnerMovePrice();
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -556,20 +856,25 @@ void GetBasketStats(const CloseBasket &basket,
          continue;
 
       double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       if(type == POSITION_TYPE_BUY)
         {
          buyCount++;
          buyProfit += profit;
-         if(profit <= InpMinWinnerProfitEach)
-            allBuysAboveMinimum = false;
+         if(bid - openPrice > requiredMove)
+            qualifiedBuyCount++;
+         else
+            allBuysAboveMinimumMove = false;
         }
       else if(type == POSITION_TYPE_SELL)
         {
          sellCount++;
          sellProfit += profit;
-         if(profit <= InpMinWinnerProfitEach)
-            allSellsAboveMinimum = false;
+         if(openPrice - ask > requiredMove)
+            qualifiedSellCount++;
+         else
+            allSellsAboveMinimumMove = false;
         }
       netProfit += profit;
      }
@@ -595,10 +900,39 @@ bool BasketHasOpenState(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
-void CloseBasketNow(const CloseBasket &basket)
+bool GetLastWinnerOpenPrice(const CloseBasket &basket,
+                            const int direction,
+                            double &lastOpenPrice)
   {
-   // Delete pending orders first so no new position can appear while the
-   // already-qualified portfolio is being closed.
+   long latestTimeMsc = -1;
+   ulong latestTicket = 0;
+   lastOpenPrice = 0.0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionBelongsToBasket(basket))
+         continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if((direction == 1 && type != POSITION_TYPE_BUY) ||
+         (direction == -1 && type != POSITION_TYPE_SELL))
+         continue;
+
+      long timeMsc = PositionGetInteger(POSITION_TIME_MSC);
+      if(timeMsc > latestTimeMsc || (timeMsc == latestTimeMsc && ticket > latestTicket))
+        {
+         latestTimeMsc = timeMsc;
+         latestTicket = ticket;
+         lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        }
+     }
+   return(lastOpenPrice > 0.0);
+  }
+
+//+------------------------------------------------------------------+
+void DeleteBasketPendingOrders(const CloseBasket &basket)
+  {
    for(int i=OrdersTotal()-1; i>=0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -608,6 +942,17 @@ void CloseBasketNow(const CloseBasket &basket)
       if(!trade.OrderDelete(ticket) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
          Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription());
      }
+  }
+
+//+------------------------------------------------------------------+
+void ApplyBasketProtection(const CloseBasket &basket)
+  {
+   DeleteBasketPendingOrders(basket);
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double stopsDistance = MathMax(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+                                  SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL)) * _Point;
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -615,10 +960,59 @@ void CloseBasketNow(const CloseBasket &basket)
       if(ticket == 0 || !PositionBelongsToBasket(basket))
          continue;
 
-      bool sent = trade.PositionClose(ticket, InpSlippagePoints);
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double curSL = PositionGetDouble(POSITION_SL);
+      double curTP = PositionGetDouble(POSITION_TP);
+      double newSL = curSL;
+      double newTP = curTP;
+      bool priceAllowed = false;
+
+      if(basket.protectionDirection == 1)
+        {
+         if(type == POSITION_TYPE_BUY)
+           {
+            newSL = (curSL > 0.0) ? MathMax(curSL, basket.protectionPrice) : basket.protectionPrice;
+            priceAllowed = (bid - newSL > stopsDistance);
+           }
+         else
+           {
+            // A common exit below an up-trending market is a TP for Sell
+            // positions; an SL cannot legally be placed below current Ask.
+            newTP = basket.protectionPrice;
+            priceAllowed = (ask - newTP > stopsDistance);
+           }
+        }
+      else
+        {
+         if(type == POSITION_TYPE_SELL)
+           {
+            newSL = (curSL > 0.0) ? MathMin(curSL, basket.protectionPrice) : basket.protectionPrice;
+            priceAllowed = (newSL - ask > stopsDistance);
+           }
+         else
+           {
+            // A common exit above a down-trending market is a TP for Buy
+            // positions; an SL cannot legally be placed above current Bid.
+            newTP = basket.protectionPrice;
+            priceAllowed = (newTP - bid > stopsDistance);
+           }
+        }
+
+      if(!priceAllowed)
+        {
+         Print("OneClickGrid: protection price too close for #", ticket,
+               " | target=", DoubleToString(basket.protectionPrice, _Digits));
+         continue;
+        }
+
+      if(MathAbs(newSL - curSL) < g_tickSize / 2.0 &&
+         MathAbs(newTP - curTP) < g_tickSize / 2.0)
+         continue;
+
+      bool sent = trade.PositionModify(ticket, newSL, newTP);
       uint retcode = trade.ResultRetcode();
       if(!sent || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_DONE_PARTIAL))
-         Print("OneClickGrid: position close failed #", ticket, " | ", trade.ResultRetcodeDescription());
+         Print("OneClickGrid: protection modify failed #", ticket, " | ", trade.ResultRetcodeDescription());
      }
   }
 
@@ -627,35 +1021,76 @@ void ManageFormulaClose()
   {
    for(int b=ArraySize(g_closeBaskets)-1; b>=0; b--)
      {
-      if(g_closeBaskets[b].closing)
+      if(g_closeBaskets[b].protectionArmed)
         {
-         CloseBasketNow(g_closeBaskets[b]);
+         ApplyBasketProtection(g_closeBaskets[b]);
          if(!BasketHasOpenState(g_closeBaskets[b]))
+           {
             ArrayRemove(g_closeBaskets, b, 1);
+            SavePersistentState();
+           }
          continue;
         }
 
       int buyCount, sellCount;
       double buyProfit, sellProfit, netProfit;
-      bool allBuysAboveMinimum, allSellsAboveMinimum;
+      bool allBuysAboveMinimumMove, allSellsAboveMinimumMove;
+      int qualifiedBuyCount, qualifiedSellCount;
       GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
-                     allBuysAboveMinimum, allSellsAboveMinimum);
+                     allBuysAboveMinimumMove, allSellsAboveMinimumMove,
+                     qualifiedBuyCount, qualifiedSellCount);
 
       bool buyRecovery = (sellCount > 0 && sellProfit < 0.0 && buyProfit > 0.0 &&
-                          buyCount >= 2 * sellCount + 1 && allBuysAboveMinimum);
+                          buyCount >= 2 * sellCount + 1 && allBuysAboveMinimumMove);
       bool sellRecovery = (buyCount > 0 && buyProfit < 0.0 && sellProfit > 0.0 &&
-                           sellCount >= 2 * buyCount + 1 && allSellsAboveMinimum);
+                           sellCount >= 2 * buyCount + 1 && allSellsAboveMinimumMove);
 
-      if((buyRecovery || sellRecovery) && netProfit > InpCloseMinProfitMoney)
+      // Pending stops on one side activate in price order. Therefore three
+      // or more currently-qualified positions on that side represent a
+      // consecutive winning run, even when the 2k+1 recovery count has not
+      // yet been reached.
+      bool buyWinningStreak = (InpConsecutiveWinners > 0 && buyProfit > 0.0 &&
+                               qualifiedBuyCount >= InpConsecutiveWinners);
+      bool sellWinningStreak = (InpConsecutiveWinners > 0 && sellProfit > 0.0 &&
+                                qualifiedSellCount >= InpConsecutiveWinners);
+
+      if((buyRecovery || sellRecovery || buyWinningStreak || sellWinningStreak) &&
+         netProfit > InpCloseMinProfitMoney)
         {
-         Print("OneClickGrid: formula close triggered for basket #", g_closeBaskets[b].rootOrderTicket,
+         int winningDirection;
+         if((buyRecovery || buyWinningStreak) && (sellRecovery || sellWinningStreak))
+            winningDirection = (buyProfit >= sellProfit) ? 1 : -1;
+         else
+            winningDirection = (buyRecovery || buyWinningStreak) ? 1 : -1;
+
+         double lastWinnerOpenPrice;
+         if(!GetLastWinnerOpenPrice(g_closeBaskets[b], winningDirection, lastWinnerOpenPrice))
+            continue;
+
+         double rawProtectionPrice = lastWinnerOpenPrice + winningDirection * InpBEPriceDistance;
+         double protectionPrice = NormalizePriceForDirection(rawProtectionPrice, -winningDirection);
+
+         // The market must be strictly beyond the requested +/- distance
+         // before that line can become the basket's protected exit.
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         bool marketBeyondProtection = (winningDirection == 1)
+            ? (bid > protectionPrice)
+            : (ask < protectionPrice);
+         if(!marketBeyondProtection)
+            continue;
+
+         Print("OneClickGrid: basket protection armed #", g_closeBaskets[b].rootOrderTicket,
                " | Buy=", buyCount, " Sell=", sellCount,
-               " | every winner > ", DoubleToString(InpMinWinnerProfitEach, 2),
+               " | qualified Buy/Sell=", qualifiedBuyCount, "/", qualifiedSellCount,
+               " | last winner=", DoubleToString(lastWinnerOpenPrice, _Digits),
+               " | protection=", DoubleToString(protectionPrice, _Digits),
                " | net=", DoubleToString(netProfit, 2));
-         g_closeBaskets[b].closing = true;
-         CloseBasketNow(g_closeBaskets[b]);
-         if(!BasketHasOpenState(g_closeBaskets[b]))
-            ArrayRemove(g_closeBaskets, b, 1);
+         g_closeBaskets[b].protectionArmed = true;
+         g_closeBaskets[b].protectionDirection = winningDirection;
+         g_closeBaskets[b].protectionPrice = protectionPrice;
+         SavePersistentState();
+         ApplyBasketProtection(g_closeBaskets[b]);
         }
      }
   }

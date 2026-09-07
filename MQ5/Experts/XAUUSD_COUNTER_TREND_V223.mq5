@@ -26,6 +26,7 @@ input string   InpAuthToken            = "33be34ac24f13a1131f00b8451c9be4a1e3dbc
 // EA's heartbeat snapshot, not the trading strategy itself, so a slower
 // interval doesn't affect entries/exits (see OnTimer() below).
 input int      InpPollInterval         = 37000;                 // รอบเวลาการดึงข้อมูลจากหลังบ้าน (มิลลิวินาที)
+input int      InpTradeSyncRetrySeconds = 10;                   // เวลารอก่อนส่ง OPEN/CLOSE ที่ล้มเหลวซ้ำ
 input int      InpSignalDedupDays      = 30;                    // เก็บผล signal ID เพื่อป้องกันเปิดซ้ำข้าม restart
 input double   InpTesterServerUtcOffsetHours = 0.0;             // Strategy Tester server offset from UTC (for example 2 or 3)
 
@@ -561,7 +562,7 @@ int fvg_bull_age = -1, fvg_bear_age = -1;
 int ob_bull_age = -1, ob_bear_age = -1;
 
 //--- Tracked positions
-struct TrackedPosition { ulong ticket; ulong identifier; string symbol; string action; double volume; double open_price; double sl; double tp; string comment; string pending_close_reason; };
+struct TrackedPosition { ulong ticket; ulong identifier; string symbol; string action; double volume; double open_price; double sl; double tp; string comment; string pending_close_reason; bool open_reported; datetime next_backend_retry; };
 TrackedPosition tracked_positions[];
 int tracked_count = 0;
 
@@ -693,6 +694,8 @@ void AddTrackedPosition(ulong t, ulong identifier, string sym, string act, doubl
    tracked_positions[tracked_count].tp = tp;
    tracked_positions[tracked_count].comment = comment;
    tracked_positions[tracked_count].pending_close_reason = "";
+   tracked_positions[tracked_count].open_reported = false;
+   tracked_positions[tracked_count].next_backend_retry = 0;
    tracked_count++;
 }
 
@@ -761,14 +764,14 @@ bool GetClosedPositionResult(const ulong position_identifier,
    return has_exit;
 }
 
-void SendLocalTradeToBackend(string id, string action, string symbol, double volume,
+bool SendLocalTradeToBackend(string id, string action, string symbol, double volume,
                              double entry_price, double sl, double tp, string status,
                              ulong ticket, double exit_price, double profit,
                              double mfe = 0.0, double mae = 0.0, double adx = 0.0,
                              double chop = 0.0, double atr_ratio = 0.0, bool is_low_vol = false,
                              string entry_condition = "", string close_reason = "")
 {
-   if(!IsExternalIntegrationAllowed()) return;
+   if(!IsExternalIntegrationAllowed()) return false;
    string url  = backend_url + "/api/signals/local";
    string hdr  = "Content-Type: application/json\r\nX-Api-Key: " + auth_token + "\r\n";
    string pay  = StringFormat("{\"token\":\"%s\",\"account_id\":%d,\"ea_id\":%d,\"id\":\"%s\",\"action\":\"%s\",\"symbol\":\"%s\","
@@ -788,7 +791,13 @@ void SendLocalTradeToBackend(string id, string action, string symbol, double vol
    StringToCharArray(pay, pd, 0, StringLen(pay), CP_UTF8);
    ResetLastError();
    int h = WebRequest("POST", url, hdr, 3000, pd, rd, rh);
-   if(h != 200) Print("ATS EA ERROR: Local sync HTTP=", h, " err=", GetLastError());
+   if(h != 200)
+   {
+      string response = CharArrayToString(rd, 0, WHOLE_ARRAY, CP_UTF8);
+      Print("ATS EA ERROR: Local sync HTTP=", h, " err=", GetLastError(), " response=", response);
+      return false;
+   }
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -848,6 +857,18 @@ void SyncPositionsWithBackend()
          if(same_position)
          {
             tracked_positions[j].ticket = tk;
+            if(!tracked_positions[j].open_reported
+               && TimeCurrent() >= tracked_positions[j].next_backend_retry)
+            {
+               bool reported = SendLocalTradeToBackend(IntegerToString(tk), tracked_positions[j].action,
+                                 tracked_positions[j].symbol, tracked_positions[j].volume,
+                                 tracked_positions[j].open_price, tracked_positions[j].sl,
+                                 tracked_positions[j].tp, "OPEN", tk, 0.0, 0.0,
+                                 0.0, 0.0, 0.0, 0.0, 0.0, false, tracked_positions[j].comment);
+               tracked_positions[j].open_reported = reported;
+               if(!reported)
+                  tracked_positions[j].next_backend_retry = TimeCurrent() + InpTradeSyncRetrySeconds;
+            }
             found = true;
             break;
          }
@@ -863,7 +884,11 @@ void SyncPositionsWithBackend()
          ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
          string comment = PositionGetString(POSITION_COMMENT);
          AddTrackedPosition(tk, identifier, sym, act, vol, op, sl, tp, comment);
-         SendLocalTradeToBackend(IntegerToString(tk), act, sym, vol, op, sl, tp, "OPEN", tk, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, comment);
+         int added_index = tracked_count - 1;
+         bool reported = SendLocalTradeToBackend(IntegerToString(tk), act, sym, vol, op, sl, tp, "OPEN", tk, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, comment);
+         tracked_positions[added_index].open_reported = reported;
+         if(!reported)
+            tracked_positions[added_index].next_backend_retry = TimeCurrent() + InpTradeSyncRetrySeconds;
       }
    }
    for(int j = tracked_count-1; j >= 0; j--)
@@ -879,6 +904,9 @@ void SyncPositionsWithBackend()
       }
       if(!found)
       {
+         if(TimeCurrent() < tracked_positions[j].next_backend_retry)
+            continue;
+
          double ep = 0.0, pf = 0.0;
          ENUM_DEAL_REASON deal_reason = DEAL_REASON_CLIENT;
          ulong identifier = tracked_positions[j].identifier;
@@ -938,12 +966,18 @@ void SyncPositionsWithBackend()
          if(GlobalVariableCheck(atr_key)) atr_ratio = GlobalVariableGet(atr_key);
          if(GlobalVariableCheck(low_vol_key)) low_vol = true;
 
-         SendLocalTradeToBackend(tk_str, tracked_positions[j].action,
+         bool close_reported = SendLocalTradeToBackend(tk_str, tracked_positions[j].action,
                                  tracked_positions[j].symbol, tracked_positions[j].volume,
                                  tracked_positions[j].open_price, tracked_positions[j].sl,
                                  tracked_positions[j].tp, stat, tk, ep, pf,
                                  mfe, mae, adx, chop, atr_ratio, low_vol, tracked_positions[j].comment,
                                  close_reason);
+
+         if(!close_reported)
+         {
+            tracked_positions[j].next_backend_retry = TimeCurrent() + InpTradeSyncRetrySeconds;
+            continue;
+         }
 
          if(GlobalVariableCheck(max_price_key)) GlobalVariableDel(max_price_key);
          if(GlobalVariableCheck(min_price_key)) GlobalVariableDel(min_price_key);
@@ -2379,6 +2413,11 @@ void CheckBEAndTrailing()
 
 bool ValidateInputParameters()
 {
+   if(InpTradeSyncRetrySeconds < 1)
+   {
+      Print("ATS EA ERROR: InpTradeSyncRetrySeconds must be at least 1 second.");
+      return false;
+   }
    if(InpMagic <= 0 || InpSlippage < 0)
    {
       Print("ATS EA ERROR: InpMagic must be positive and InpSlippage cannot be negative.");

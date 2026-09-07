@@ -72,6 +72,18 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
             return BadRequest("ticket must be numeric");
 
         var accountId = request.AccountId ?? DefaultAccountId;
+        var eaId = request.EaId ?? DefaultEa3Id;
+
+        // account_id and ea_id are configured independently in MT5. Reject a
+        // mixed pair instead of inserting a trade that is attached to one
+        // account but named by an EA registered under another account.
+        var ownerIsValid = await db.Eas.AsNoTracking().AnyAsync(
+            e => e.EaId == eaId && e.AccountId == accountId, ct);
+        if (!ownerIsValid)
+            return BadRequest(new
+            {
+                message = $"EA {eaId} is not registered under account {accountId}."
+            });
 
         var trade = await db.Trades.FirstOrDefaultAsync(
             t => t.AccountId == accountId && t.Mt5Ticket == ticket, ct);
@@ -84,13 +96,20 @@ public class SignalsController(EaConsoleDbContext db, IIngestService ingestServi
             trade = new Trade
             {
                 AccountId = accountId,
-                EaId = request.EaId ?? DefaultEa3Id,
+                EaId = eaId,
                 Mt5Ticket = ticket,
                 OpenTimeBroker = now, // EA3 does not send a broker open time; receipt time is the best we have
                 CreatedAt = now,
             };
             db.Trades.Add(trade);
         }
+
+        // This endpoint is dedicated to EA3's local trades, so its report is
+        // authoritative for ownership. This repairs the old race where a
+        // stale SP/BO build observed the same DEAL_ADD first and inserted the
+        // CT ticket under its own ea_id; later CT reports used to update the
+        // row without correcting EaId.
+        trade.EaId = eaId;
 
         trade.Symbol = request.Symbol;
         trade.Side = EnumDbMaps.TradeSideFromDb(request.Action);

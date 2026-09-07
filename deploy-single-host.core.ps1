@@ -96,9 +96,8 @@ Set-WebConfigEnvVar -Name "ConnectionStrings__EaConsole" -Value $DbConnStr
 Set-WebConfigEnvVar -Name "Cors__AllowedOrigins__0" -Value $CorsOrigin
 Set-WebConfigEnvVar -Name "Ingest__ApiKey" -Value $IngestApiKey
 
-# Preserve startup failures in deploy/backend/logs/ instead of returning a
-# context-free HTTP 500 from IIS.
-$aspNetCoreNode.SetAttribute("stdoutLogEnabled", "true")
+# Keep IIS/ANCM stdout logging disabled on the shared production host.
+$aspNetCoreNode.SetAttribute("stdoutLogEnabled", "false")
 $aspNetCoreNode.SetAttribute("hostingModel", "outofprocess")
 $webConfig.Save($webConfigPath)
 
@@ -107,10 +106,6 @@ $webConfig.Save($webConfigPath)
 # reliably than keeping them loaded inside w3wp. The self-contained app still
 # resolves Microsoft.AspNetCore.Server.IIS.dll during WebApplication startup;
 # upload-ftp.ps1 retains it and uses its verified fallback when required.
-
-# ANCM only writes into logs/ if the directory already exists on the server.
-New-Item -Path "$repoRoot\deploy\backend\logs" -ItemType Directory -Force | Out-Null
-Set-Content -Path "$repoRoot\deploy\backend\logs\.keep" -Value "placeholder so FTP sync creates this directory" -Force
 
 # 3. Create maintenance page
 Write-Host "3. Creating maintenance page..." -ForegroundColor Yellow

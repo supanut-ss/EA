@@ -60,10 +60,26 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
     // Upsert ด้วย (AccountId, Mt5Ticket) — EA ยิง ticket เดิมซ้ำได้ทุกครั้งที่
     // สถานะไม้เปลี่ยน (ราคาปัจจุบันขยับ, ปิดไม้ ฯลฯ) โดยไม่ต้องรู้ trade_id
     // ภายในของเรา
-    public async Task IngestTradeAsync(TradeIngestRequest request, CancellationToken ct = default)
+    public async Task<TradeIngestResult> IngestTradeAsync(TradeIngestRequest request, CancellationToken ct = default)
     {
+        // Never accept a caller-supplied ea_id that belongs to another account.
+        // Without this check a misconfigured terminal can create rows that no
+        // account dashboard can classify correctly.
+        var ownerIsValid = await db.Eas.AsNoTracking().AnyAsync(
+            e => e.EaId == request.EaId && e.AccountId == request.AccountId, ct);
+        if (!ownerIsValid)
+            return TradeIngestResult.InvalidOwner;
+
         var trade = await db.Trades.FirstOrDefaultAsync(
             t => t.AccountId == request.AccountId && t.Mt5Ticket == request.Mt5Ticket, ct);
+
+        // A ticket is unique within an MT5 account. Once another EA has
+        // authoritatively claimed it, a stale/misconfigured EA must not mutate
+        // its lot, P&L, or close reason. EA3's /api/signals/local endpoint can
+        // repair the historical first-writer race because it owns that
+        // protocol and explicitly reasserts the CT owner.
+        if (trade is not null && trade.EaId != request.EaId)
+            return TradeIngestResult.OwnershipConflict;
 
         // Dashboard contract: retain only trades whose lifecycle is managed
         // entirely by an EA. A manual close is authoritative proof that this
@@ -78,7 +94,7 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
                 db.Trades.Remove(trade);
                 await db.SaveChangesAsync(ct);
             }
-            return;
+            return TradeIngestResult.Accepted;
         }
 
         if (trade is null)
@@ -114,6 +130,7 @@ public class IngestService(EaConsoleDbContext db) : IIngestService
         trade.UpdatedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
+        return TradeIngestResult.Accepted;
     }
 
     public async Task IngestActivityLogAsync(ActivityLogIngestRequest request, CancellationToken ct = default)

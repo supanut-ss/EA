@@ -1,7 +1,7 @@
 # EA3 — XAUUSD_COUNTER_TREND — สรุป Logic ทั้งหมด
 
-**ไฟล์:** [MQ5/Experts/XAUUSD_COUNTER_TREND.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND.mq5) (v2.22)
-พร้อมไฟล์ทดลองรุ่นแก้ไข [XAUUSD_COUNTER_TREND_V223.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND_V223.mq5) (v2.23) และ [XAUUSD_COUNTER_TREND_V224.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND_V224.mq5) (v2.24)
+**ไฟล์ production ล่าสุด:** [MQ5/Experts/XAUUSD_COUNTER_TREND.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND.mq5) (v2.24)
+ไฟล์ [XAUUSD_COUNTER_TREND_V224.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND_V224.mq5) เก็บเป็นสำเนาระบุรุ่น และ [XAUUSD_COUNTER_TREND_V223.mq5](../MQ5/Experts/XAUUSD_COUNTER_TREND_V223.mq5) เป็นรุ่นก่อนหน้า
 
 **ชื่อในระบบ backend:** EA3 (ea_id=3, magic=88188) — ใช้โปรโตคอล "ATS" ของตัวเอง แยกจาก EA1/EA2 (`EaIngestClient.mqh`) โดยสิ้นเชิง — ดู [SignalsController.cs](../Backend/EaConsole.Api/Controllers/SignalsController.cs) และ [SignalsDtos.cs](../Backend/EaConsole.Api/Dtos/SignalsDtos.cs)
 บัญชีที่ผูกไว้: `account_id = 2` (Exness-MT5Real8 login 411757774, บัญชี Live แยกจาก EA1/EA2)
@@ -63,20 +63,20 @@ EA3 เป็น EA แนว **Counter-Trend / Pullback** บน Price Structur
 
 ```
 sr = swing_high - swing_low
-dl  = swing_low  + sr * InpPDThreshold   // เส้น Discount (v2.22)
-pl2 = swing_high - sr * InpPDThreshold   // เส้น Premium (v2.22)
+dl  = swing_high - sr * InpPDThreshold   // เส้น Discount (v2.24)
+pl2 = swing_low  + sr * InpPDThreshold   // เส้น Premium (v2.24)
 ```
 
 - เทรนด์ขาขึ้น (`trend==1`) และราคาลง**แตะ/หลุดต่ำกว่า** `dl` → `touched_discount = true` (โซนราคาถูก รอ BUY)
 - เทรนด์ขาลง (`trend==-1`) และราคาขึ้น**แตะ/สูงกว่า** `pl2` → `touched_premium = true` (โซนราคาแพง รอ SELL)
 - สถานะจะถูกล้างเมื่อมีโพซิชันฝั่งนั้นเปิดอยู่แล้ว (`ps>0`/`ps<0`) หรือราคาวิ่งกลับไปพ้นโซนตรงข้าม
 
-> **⚠️ หมายเหตุสำคัญ:** สูตรใน v2.22 (ไฟล์หลักปัจจุบัน) ตีความ `InpPDThreshold` เป็น "ระยะจาก extreme ตรงข้าม" (เช่น 0.700 หมายถึงวัดขึ้นจาก swing_low) ส่วนใน v2.23/v2.24 มีการ "แก้ไข" สูตรให้วัด **retracement depth จาก extreme ของฝั่งอิมพัลส์เอง** แทน:
+> **หมายเหตุ:** ตั้งแต่ v2.23 สูตรถูกแก้ให้วัด **retracement depth จาก extreme ของฝั่งอิมพัลส์เอง** และ v2.24 เป็นไฟล์ production หลัก:
 > ```
 > dl  = swing_high - sr * InpPDThreshold   // v2.23/2.24
 > pl2 = swing_low  + sr * InpPDThreshold
 > ```
-> พร้อมปรับค่า default: v2.22 = `0.700`, v2.23 = `0.550` (55% retracement), v2.24 = `0.350` (35%, "balanced-frequency" — ปรับให้ความถี่การเข้าไม้สมดุลขึ้น) ทั้งสามไฟล์เป็นซอร์สเกือบเหมือนกันทุกจุดอื่น ต่างกันแค่สูตร/ค่านี้กับ version string
+> ค่า default ของ v2.24 คือ `0.350` (35%, "balanced-frequency" — ปรับให้ความถี่การเข้าไม้สมดุลขึ้น)
 
 ---
 
@@ -218,7 +218,7 @@ SELL ปกติ (`normalShortCond`) สมมาตรกัน
 |---|---|---|
 | Trade | Magic / Lot / Slippage | 88188 / 0.05 / 20 pts |
 | Structure | Pivot length / BOS confirm / CHoCH max age | 4 / 2 แท่ง / 12 แท่ง |
-| PD Zone | `InpPDThreshold` | 0.700 (v2.22) / 0.550 (v2.23) / 0.350 (v2.24) |
+| PD Zone | `InpPDThreshold` | 0.350 (v2.24 production) |
 | Entry mode | `InpEntryMode` | Discount/Premium Only |
 | Trend filter | H1/H4 EMA(21), M5 EMA(200), Counter-trend filter | เปิดทั้งหมด |
 | SL/TP | Fixed SL / TP | 10,000 pts / 37,500 pts |
