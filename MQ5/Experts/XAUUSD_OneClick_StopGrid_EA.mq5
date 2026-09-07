@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.21"
+#property version   "1.22"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -24,11 +24,14 @@ input group "=== Optional SL / TP (price distance) ==="
 input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distance from each pending entry price
 input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distance from each pending entry price
 
-input group "=== Formula Portfolio Close ==="
-input bool     InpUseFormulaClose       = true;    // Arm basket BE protection when winning side qualifies
-input double   InpCloseMinProfitMoney   = 0.0;     // Basket floating profit must be greater than this amount before arming
-input double   InpBEPriceDistance       = 1.0;     // Direct price distance from the last winner; 4000 + 1 = 4001
-input int      InpConsecutiveWinners    = 3;       // Qualifying same-side winners required; 0 = use only 2k+1 formula
+input group "=== Basket Exit Rules ==="
+input bool     InpUseFormulaClose       = true;    // Master switch for both basket exit rules
+input bool     InpUseRecoveryFormula    = true;    // MAIN GATE: winning side count >= 2 * losing count + 1
+input int      InpConsecutiveWinners    = 3;       // CASE 1 (k = 0) minimum winning-side positions
+input int      InpWinnerMoveCents       = 150;     // CASE 1 last-winner move in price cents; 150 = 1.500 (4000 -> 4001.5)
+input int      InpProfitLockCents       = 100;     // CASE 1 locked SL distance in price cents; 100 = 1.000 (SL 4001)
+input int      InpLossExitMoveCents     = 150;     // CASE 2 (k > 0) last-winner move that closes the basket at market
+input double   InpCloseMinProfitMoney   = 0.0;     // CASE 1 only; basket floating profit must exceed this before arming
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
@@ -49,9 +52,10 @@ struct CloseBasket
   {
    ulong rootOrderTicket;
    ulong manualPositionId;
-   bool  protectionArmed;
+   bool  protectionArmed;      // CASE 1 latch: locked SL/TP line is active
    int   protectionDirection;
    double protectionPrice;
+   bool  marketExitRequested;  // CASE 2 latch: close every position at market
    datetime startTime;
   };
 CloseBasket g_closeBaskets[];
@@ -63,11 +67,19 @@ int OnInit()
       InpPriceStepCents <= 0 || InpLotFactorStep <= 0.0 ||
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
-      InpCloseMinProfitMoney < 0.0 || InpBEPriceDistance <= 0.0 ||
-      InpConsecutiveWinners < 0 ||
+      InpCloseMinProfitMoney < 0.0 ||
+      InpWinnerMoveCents <= 0 || InpProfitLockCents <= 0 ||
+      InpLossExitMoveCents <= 0 ||
+      InpConsecutiveWinners < 1 ||
       InpExpirationHours < 0)
      {
       Print("OneClickGrid: invalid input parameters");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   if(InpProfitLockCents >= InpWinnerMoveCents)
+     {
+      Print("OneClickGrid: InpProfitLockCents must stay below InpWinnerMoveCents so the locked SL sits behind the qualifying price");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
@@ -106,11 +118,15 @@ int OnInit()
          " | step=", DoubleToString(GridStepPrice(), _Digits),
          " (", InpPriceStepCents, " cents)",
          " | lot factors=1x,+", DoubleToString(InpLotFactorStep, 2), "x per level");
-   Print("OneClickGrid: basket BE protection requires every winning position to move > ",
-         DoubleToString(MinWinnerMovePrice(), _Digits),
-         " in direct price distance from its entry");
-   if(InpConsecutiveWinners > 0)
-      Print("OneClickGrid: consecutive-winner protection shortcut = ", InpConsecutiveWinners, " positions");
+   Print("OneClickGrid: main gate = ", InpUseRecoveryFormula
+         ? "winning side must hold >= 2k+1 positions (k = losing positions)"
+         : "disabled");
+   Print("OneClickGrid: CASE 1 (k = 0) = ", InpConsecutiveWinners,
+         " winners and the last winner past ", DoubleToString(WinnerMovePrice(), _Digits),
+         " arm a locked SL at ", DoubleToString(ProfitLockPrice(), _Digits),
+         " from that entry");
+   Print("OneClickGrid: CASE 2 (k > 0) = close the whole basket at market once the last winner moves past ",
+         DoubleToString(LossExitMovePrice(), _Digits));
    return(INIT_SUCCEEDED);
   }
 
@@ -256,11 +272,23 @@ double GridStepPrice()
   }
 
 //+------------------------------------------------------------------+
-double MinWinnerMovePrice()
+double WinnerMovePrice()
   {
-   // This distance is a direct quote-price value. It deliberately does not
-   // use broker _Point: 1.0 means 4000 -> 4001, exactly as configured.
-   return(InpBEPriceDistance);
+   // Exit distances share the grid's price-cent unit and deliberately ignore
+   // broker _Point: 150 always means 4000 -> 4001.5.
+   return(InpWinnerMoveCents / 100.0);
+  }
+
+//+------------------------------------------------------------------+
+double ProfitLockPrice()
+  {
+   return(InpProfitLockCents / 100.0);
+  }
+
+//+------------------------------------------------------------------+
+double LossExitMovePrice()
+  {
+   return(InpLossExitMoveCents / 100.0);
   }
 
 //+------------------------------------------------------------------+
@@ -532,6 +560,7 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].protectionArmed = false;
    g_closeBaskets[size].protectionDirection = 0;
    g_closeBaskets[size].protectionPrice = 0.0;
+   g_closeBaskets[size].marketExitRequested = false;
    g_closeBaskets[size].startTime = startTime;
    return(true);
   }
@@ -686,7 +715,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P"};
+   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P","X"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -710,12 +739,13 @@ void SavePersistentState()
       WriteStateValue(BasketStateKey(i, "A"), g_closeBaskets[i].protectionArmed ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "D"), (double)g_closeBaskets[i].protectionDirection);
       WriteStateValue(BasketStateKey(i, "P"), g_closeBaskets[i].protectionPrice);
+      WriteStateValue(BasketStateKey(i, "X"), g_closeBaskets[i].marketExitRequested ? 1.0 : 0.0);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
       DeleteBasketStateSlot(i);
 
    WriteStateValue(g_statePrefix + ".BC", (double)basketCount);
-   WriteStateValue(g_statePrefix + ".V", 3.0);
+   WriteStateValue(g_statePrefix + ".V", 4.0);
    GlobalVariablesFlush();
   }
 
@@ -729,7 +759,7 @@ void LoadPersistentBaskets()
       return;
 
    int stateVersion = (int)MathRound(versionValue);
-   if(stateVersion < 1 || stateVersion > 3)
+   if(stateVersion < 1 || stateVersion > 4)
       return;
 
    int count = (int)MathRound(countValue);
@@ -782,6 +812,15 @@ void LoadPersistentBaskets()
         }
       else if(protectionComplete && armedValue > 0.5)
          Print("OneClickGrid: discarded incomplete formula protection state #", root);
+
+      double marketExitValue = 0.0;
+      if(index >= 0 && stateVersion >= 4 &&
+         ReadStateValue(BasketStateKey(i, "X"), marketExitValue) && marketExitValue > 0.5)
+        {
+         g_closeBaskets[index].marketExitRequested = true;
+         Print("OneClickGrid: restored CASE 2 market-exit latch #", root,
+               "; the basket is closed on the next tick");
+        }
      }
   }
 
@@ -830,24 +869,14 @@ void GetBasketStats(const CloseBasket &basket,
                     double &buyProfit,
                     double &sellProfit,
                     double &netProfit,
-                    bool &allBuysAboveMinimumMove,
-                    bool &allSellsAboveMinimumMove,
-                    int &qualifiedBuyCount,
-                    int &qualifiedSellCount)
+                    int &losingCount)
   {
    buyCount = 0;
    sellCount = 0;
    buyProfit = 0.0;
    sellProfit = 0.0;
    netProfit = 0.0;
-   allBuysAboveMinimumMove = true;
-   allSellsAboveMinimumMove = true;
-   qualifiedBuyCount = 0;
-   qualifiedSellCount = 0;
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double requiredMove = MinWinnerMovePrice();
+   losingCount = 0;
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -856,26 +885,20 @@ void GetBasketStats(const CloseBasket &basket,
          continue;
 
       double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       if(type == POSITION_TYPE_BUY)
         {
          buyCount++;
          buyProfit += profit;
-         if(bid - openPrice > requiredMove)
-            qualifiedBuyCount++;
-         else
-            allBuysAboveMinimumMove = false;
         }
       else if(type == POSITION_TYPE_SELL)
         {
          sellCount++;
          sellProfit += profit;
-         if(openPrice - ask > requiredMove)
-            qualifiedSellCount++;
-         else
-            allSellsAboveMinimumMove = false;
         }
+
+      if(profit < 0.0)
+         losingCount++;
       netProfit += profit;
      }
   }
@@ -941,6 +964,25 @@ void DeleteBasketPendingOrders(const CloseBasket &basket)
 
       if(!trade.OrderDelete(ticket) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
          Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription());
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CloseBasketAtMarket(const CloseBasket &basket)
+  {
+   // Pending orders go first so a fill cannot re-enter the basket between
+   // the individual position closes.
+   DeleteBasketPendingOrders(basket);
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionBelongsToBasket(basket))
+         continue;
+
+      if(!trade.PositionClose(ticket, InpSlippagePoints))
+         Print("OneClickGrid: market close failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
      }
   }
 
@@ -1021,9 +1063,14 @@ void ManageFormulaClose()
   {
    for(int b=ArraySize(g_closeBaskets)-1; b>=0; b--)
      {
-      if(g_closeBaskets[b].protectionArmed)
+      // Both latches are retried every tick until the basket is empty.
+      if(g_closeBaskets[b].marketExitRequested || g_closeBaskets[b].protectionArmed)
         {
-         ApplyBasketProtection(g_closeBaskets[b]);
+         if(g_closeBaskets[b].marketExitRequested)
+            CloseBasketAtMarket(g_closeBaskets[b]);
+         else
+            ApplyBasketProtection(g_closeBaskets[b]);
+
          if(!BasketHasOpenState(g_closeBaskets[b]))
            {
             ArrayRemove(g_closeBaskets, b, 1);
@@ -1032,66 +1079,95 @@ void ManageFormulaClose()
          continue;
         }
 
-      int buyCount, sellCount;
+      int buyCount, sellCount, losingCount;
       double buyProfit, sellProfit, netProfit;
-      bool allBuysAboveMinimumMove, allSellsAboveMinimumMove;
-      int qualifiedBuyCount, qualifiedSellCount;
       GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
-                     allBuysAboveMinimumMove, allSellsAboveMinimumMove,
-                     qualifiedBuyCount, qualifiedSellCount);
+                     losingCount);
 
-      bool buyRecovery = (sellCount > 0 && sellProfit < 0.0 && buyProfit > 0.0 &&
-                          buyCount >= 2 * sellCount + 1 && allBuysAboveMinimumMove);
-      bool sellRecovery = (buyCount > 0 && buyProfit < 0.0 && sellProfit > 0.0 &&
-                           sellCount >= 2 * buyCount + 1 && allSellsAboveMinimumMove);
+      if(buyCount + sellCount == 0)
+         continue;
 
-      // Pending stops on one side activate in price order. Therefore three
-      // or more currently-qualified positions on that side represent a
-      // consecutive winning run, even when the 2k+1 recovery count has not
-      // yet been reached.
-      bool buyWinningStreak = (InpConsecutiveWinners > 0 && buyProfit > 0.0 &&
-                               qualifiedBuyCount >= InpConsecutiveWinners);
-      bool sellWinningStreak = (InpConsecutiveWinners > 0 && sellProfit > 0.0 &&
-                                qualifiedSellCount >= InpConsecutiveWinners);
+      // The winning side is the profitable direction; k is the number of
+      // losing positions currently held by the basket.
+      int winningDirection = 0;
+      if(buyProfit > 0.0 && sellProfit > 0.0)
+         winningDirection = (buyProfit >= sellProfit) ? 1 : -1;
+      else if(buyProfit > 0.0)
+         winningDirection = 1;
+      else if(sellProfit > 0.0)
+         winningDirection = -1;
+      if(winningDirection == 0)
+         continue;
 
-      if((buyRecovery || sellRecovery || buyWinningStreak || sellWinningStreak) &&
-         netProfit > InpCloseMinProfitMoney)
+      int winnerCount = (winningDirection == 1) ? buyCount : sellCount;
+
+      // MAIN GATE - the winning side must hold at least 2k+1 positions.
+      if(InpUseRecoveryFormula && winnerCount < 2 * losingCount + 1)
+         continue;
+
+      // Both cases measure the move of the newest position on the winning
+      // side, not of the basket as a whole.
+      double lastWinnerOpenPrice;
+      if(!GetLastWinnerOpenPrice(g_closeBaskets[b], winningDirection, lastWinnerOpenPrice))
+         continue;
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double lastWinnerMove = (winningDirection == 1)
+         ? (bid - lastWinnerOpenPrice)
+         : (lastWinnerOpenPrice - ask);
+
+      // CASE 2 - the basket still carries a losing position. Once the last
+      // winner has moved past the exit distance the whole basket is closed
+      // at market, regardless of net P/L.
+      if(losingCount > 0)
         {
-         int winningDirection;
-         if((buyRecovery || buyWinningStreak) && (sellRecovery || sellWinningStreak))
-            winningDirection = (buyProfit >= sellProfit) ? 1 : -1;
-         else
-            winningDirection = (buyRecovery || buyWinningStreak) ? 1 : -1;
-
-         double lastWinnerOpenPrice;
-         if(!GetLastWinnerOpenPrice(g_closeBaskets[b], winningDirection, lastWinnerOpenPrice))
+         if(lastWinnerMove <= LossExitMovePrice())
             continue;
 
-         double rawProtectionPrice = lastWinnerOpenPrice + winningDirection * InpBEPriceDistance;
-         double protectionPrice = NormalizePriceForDirection(rawProtectionPrice, -winningDirection);
-
-         // The market must be strictly beyond the requested +/- distance
-         // before that line can become the basket's protected exit.
-         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         bool marketBeyondProtection = (winningDirection == 1)
-            ? (bid > protectionPrice)
-            : (ask < protectionPrice);
-         if(!marketBeyondProtection)
-            continue;
-
-         Print("OneClickGrid: basket protection armed #", g_closeBaskets[b].rootOrderTicket,
+         Print("OneClickGrid: CASE 2 market exit #", g_closeBaskets[b].rootOrderTicket,
                " | Buy=", buyCount, " Sell=", sellCount,
-               " | qualified Buy/Sell=", qualifiedBuyCount, "/", qualifiedSellCount,
+               " | winners=", winnerCount, " k=", losingCount,
                " | last winner=", DoubleToString(lastWinnerOpenPrice, _Digits),
-               " | protection=", DoubleToString(protectionPrice, _Digits),
+               " moved ", DoubleToString(lastWinnerMove, _Digits),
                " | net=", DoubleToString(netProfit, 2));
-         g_closeBaskets[b].protectionArmed = true;
-         g_closeBaskets[b].protectionDirection = winningDirection;
-         g_closeBaskets[b].protectionPrice = protectionPrice;
+         g_closeBaskets[b].marketExitRequested = true;
          SavePersistentState();
-         ApplyBasketProtection(g_closeBaskets[b]);
+         CloseBasketAtMarket(g_closeBaskets[b]);
+         continue;
         }
+
+      // CASE 1 - no losing position (for example 3 winners and 0 losers).
+      // The last winner's move arms a locked exit at the shorter
+      // profit-lock distance from that position's entry price.
+      if(winnerCount < InpConsecutiveWinners ||
+         lastWinnerMove <= WinnerMovePrice() ||
+         netProfit <= InpCloseMinProfitMoney)
+         continue;
+
+      double rawProtectionPrice = lastWinnerOpenPrice + winningDirection * ProfitLockPrice();
+      double protectionPrice = NormalizePriceForDirection(rawProtectionPrice, -winningDirection);
+
+      // The market must be strictly beyond the locked line before it can
+      // become the basket's protected exit.
+      bool marketBeyondProtection = (winningDirection == 1)
+         ? (bid > protectionPrice)
+         : (ask < protectionPrice);
+      if(!marketBeyondProtection)
+         continue;
+
+      Print("OneClickGrid: CASE 1 profit lock armed #", g_closeBaskets[b].rootOrderTicket,
+            " | Buy=", buyCount, " Sell=", sellCount,
+            " | winners=", winnerCount, " k=0",
+            " | last winner=", DoubleToString(lastWinnerOpenPrice, _Digits),
+            " moved ", DoubleToString(lastWinnerMove, _Digits),
+            " | locked exit=", DoubleToString(protectionPrice, _Digits),
+            " | net=", DoubleToString(netProfit, 2));
+      g_closeBaskets[b].protectionArmed = true;
+      g_closeBaskets[b].protectionDirection = winningDirection;
+      g_closeBaskets[b].protectionPrice = protectionPrice;
+      SavePersistentState();
+      ApplyBasketProtection(g_closeBaskets[b]);
      }
   }
 //+------------------------------------------------------------------+
