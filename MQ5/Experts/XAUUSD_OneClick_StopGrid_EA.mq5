@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.24"
+#property version   "1.25"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -16,8 +16,8 @@ CTrade trade;
 #define MAX_TRACKED_BASKETS         64
 
 input group "=== Opening Grid ==="
-input int      InpOrdersPerSide       = 9;       // Total levels per side; the manual entry counts as level 1 on its side
-input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
+input int      InpOrdersPerSide       = 7;       // Total levels per side; the manual entry counts as level 1 on its side
+input int      InpPriceStepCents       = 300;     // Grid distance in price cents; 300 = 3.000 (4000 -> 4003)
 input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = (2*level-1) * this, e.g. 0.01 -> 0.03, 0.05, 0.07, 0.09, ...
 
 input group "=== Optional SL / TP (price distance) ==="
@@ -32,6 +32,8 @@ input int      InpWinnerMoveCents       = 150;     // CASE 1 last-winner move in
 input int      InpProfitLockCents       = 100;     // CASE 1 locked SL distance in price cents; 100 = 1.000 (SL 4001)
 input int      InpLossExitMoveCents     = 150;     // CASE 2 (k > 0) last-winner move that closes the basket at market
 input double   InpCloseMinProfitMoney   = 0.0;     // CASE 1 only; basket floating profit must exceed this before arming
+input int      InpMaxLosersBeforeCut    = 3;       // LOSER CUT: 0 = disabled; otherwise close everything once this many losers exist and the newest one is passed
+input int      InpLoserCutMoveCents     = 200;     // LOSER CUT adverse move past the newest losing entry in price cents; 200 = 2.000
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
@@ -71,6 +73,8 @@ int OnInit()
       InpWinnerMoveCents <= 0 || InpProfitLockCents <= 0 ||
       InpLossExitMoveCents <= 0 ||
       InpConsecutiveWinners < 1 ||
+      InpMaxLosersBeforeCut < 0 ||
+      (InpMaxLosersBeforeCut > 0 && InpLoserCutMoveCents <= 0) ||
       InpExpirationHours < 0)
      {
       Print("OneClickGrid: invalid input parameters");
@@ -133,6 +137,10 @@ int OnInit()
          " from that entry");
    Print("OneClickGrid: CASE 2 (k > 0) = close the whole basket at market once the last winner moves past ",
          DoubleToString(LossExitMovePrice(), _Digits));
+   Print("OneClickGrid: LOSER CUT = ", InpMaxLosersBeforeCut > 0
+         ? StringFormat("close everything once k >= %d and price runs %s past the newest losing entry",
+                        InpMaxLosersBeforeCut, DoubleToString(LoserCutMovePrice(), _Digits))
+         : "disabled");
    return(INIT_SUCCEEDED);
   }
 
@@ -301,6 +309,12 @@ double ProfitLockPrice()
 double LossExitMovePrice()
   {
    return(InpLossExitMoveCents / 100.0);
+  }
+
+//+------------------------------------------------------------------+
+double LoserCutMovePrice()
+  {
+   return(InpLoserCutMoveCents / 100.0);
   }
 
 //+------------------------------------------------------------------+
@@ -966,6 +980,47 @@ bool GetLastWinnerOpenPrice(const CloseBasket &basket,
   }
 
 //+------------------------------------------------------------------+
+bool GetNewestLoserAdverseMove(const CloseBasket &basket, double &adverseMove)
+  {
+   long latestTimeMsc = -1;
+   ulong latestTicket = 0;
+   double entryPrice = 0.0;
+   int direction = 0;
+   adverseMove = 0.0;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionBelongsToBasket(basket))
+         continue;
+
+      // Same loser definition GetBasketStats uses for k.
+      if(PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) >= 0.0)
+         continue;
+
+      long timeMsc = PositionGetInteger(POSITION_TIME_MSC);
+      if(timeMsc > latestTimeMsc || (timeMsc == latestTimeMsc && ticket > latestTicket))
+        {
+         latestTimeMsc = timeMsc;
+         latestTicket = ticket;
+         entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         direction = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+        }
+     }
+
+   if(direction == 0 || entryPrice <= 0.0)
+      return(false);
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return(false);
+
+   adverseMove = (direction == 1) ? (entryPrice - bid) : (ask - entryPrice);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
 void DeleteBasketPendingOrders(const CloseBasket &basket)
   {
    for(int i=OrdersTotal()-1; i>=0; i--)
@@ -1098,6 +1153,31 @@ void ManageFormulaClose()
 
       if(buyCount + sellCount == 0)
          continue;
+
+      // LOSER CUT - hard loss stop, evaluated before every other rule. Once
+      // the basket carries InpMaxLosersBeforeCut losing positions and price
+      // has run LoserCutMovePrice() past the newest of them, the whole
+      // basket is closed at market. With a 3.000 grid and a 2.000 cut the
+      // exit fires before the next adverse level can fill, so the losing
+      // side cannot keep growing.
+      if(InpMaxLosersBeforeCut > 0 && losingCount >= InpMaxLosersBeforeCut)
+        {
+         double loserAdverseMove;
+         if(GetNewestLoserAdverseMove(g_closeBaskets[b], loserAdverseMove) &&
+            loserAdverseMove >= LoserCutMovePrice())
+           {
+            Print("OneClickGrid: LOSER CUT market exit #", g_closeBaskets[b].rootOrderTicket,
+                  " | Buy=", buyCount, " Sell=", sellCount,
+                  " | k=", losingCount, " >= ", InpMaxLosersBeforeCut,
+                  " | newest loser ran ", DoubleToString(loserAdverseMove, _Digits),
+                  " past its entry (limit ", DoubleToString(LoserCutMovePrice(), _Digits), ")",
+                  " | net=", DoubleToString(netProfit, 2));
+            g_closeBaskets[b].marketExitRequested = true;
+            SavePersistentState();
+            CloseBasketAtMarket(g_closeBaskets[b]);
+            continue;
+           }
+        }
 
       // SAFETY BREAKER - the main gate needs winnerCount >= 2*losingCount+1,
       // but winnerCount can never exceed InpOrdersPerSide (the grid's own
