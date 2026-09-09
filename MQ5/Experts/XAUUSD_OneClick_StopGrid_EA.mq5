@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.23"
+#property version   "1.24"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -16,7 +16,7 @@ CTrade trade;
 #define MAX_TRACKED_BASKETS         64
 
 input group "=== Opening Grid ==="
-input int      InpOrdersPerSide       = 7;       // Total levels per side; the manual entry counts as level 1 on its side
+input int      InpOrdersPerSide       = 9;       // Total levels per side; the manual entry counts as level 1 on its side
 input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
 input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = (2*level-1) * this, e.g. 0.01 -> 0.03, 0.05, 0.07, 0.09, ...
 
@@ -122,6 +122,11 @@ int OnInit()
    Print("OneClickGrid: main gate = ", InpUseRecoveryFormula
          ? "winning side must hold >= 2k+1 positions (k = losing positions)"
          : "disabled");
+   if(InpUseRecoveryFormula)
+      Print("OneClickGrid: SAFETY BREAKER = market-close the basket once k > ",
+            (int)((InpOrdersPerSide - 1) / 2),
+            " losing positions, since the gate can no longer be satisfied within ",
+            InpOrdersPerSide, " levels/side");
    Print("OneClickGrid: CASE 1 (k = 0) = ", InpConsecutiveWinners,
          " winners and the last winner past ", DoubleToString(WinnerMovePrice(), _Digits),
          " arm a locked SL at ", DoubleToString(ProfitLockPrice(), _Digits),
@@ -1093,6 +1098,26 @@ void ManageFormulaClose()
 
       if(buyCount + sellCount == 0)
          continue;
+
+      // SAFETY BREAKER - the main gate needs winnerCount >= 2*losingCount+1,
+      // but winnerCount can never exceed InpOrdersPerSide (the grid's own
+      // level cap). Once losingCount grows past that ceiling the gate can
+      // mathematically never be satisfied again, so CASE 1/2 would never
+      // fire and the basket would sit open indefinitely while price whips
+      // back and forth. Cut losses now instead of waiting forever.
+      if(InpUseRecoveryFormula && losingCount > 0 &&
+         2 * losingCount + 1 > InpOrdersPerSide)
+        {
+         Print("OneClickGrid: SAFETY BREAKER market exit #", g_closeBaskets[b].rootOrderTicket,
+               " | Buy=", buyCount, " Sell=", sellCount,
+               " | k=", losingCount, " needs winners>=", 2 * losingCount + 1,
+               " but max winners=", InpOrdersPerSide, " (gate unreachable)",
+               " | net=", DoubleToString(netProfit, 2));
+         g_closeBaskets[b].marketExitRequested = true;
+         SavePersistentState();
+         CloseBasketAtMarket(g_closeBaskets[b]);
+         continue;
+        }
 
       // The winning side is the profitable direction; k is the number of
       // losing positions currently held by the basket.
