@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.22"
+#property version   "1.23"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -16,9 +16,9 @@ CTrade trade;
 #define MAX_TRACKED_BASKETS         64
 
 input group "=== Opening Grid ==="
-input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
+input int      InpOrdersPerSide       = 7;       // Total levels per side; the manual entry counts as level 1 on its side
 input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
-input double   InpLotFactorStep        = 2.0;     // Factor increment per level; 2.0 gives 1x, 3x, 5x, 7x, 9x
+input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = (2*level-1) * this, e.g. 0.01 -> 0.03, 0.05, 0.07, 0.09, ...
 
 input group "=== Optional SL / TP (price distance) ==="
 input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distance from each pending entry price
@@ -64,7 +64,7 @@ CloseBasket g_closeBaskets[];
 int OnInit()
   {
    if(InpOrdersPerSide < 1 || InpOrdersPerSide > MAX_GRID_LEVELS_PER_SIDE ||
-      InpPriceStepCents <= 0 || InpLotFactorStep <= 0.0 ||
+      InpPriceStepCents <= 0 || InpFixedLotUnit <= 0.0 ||
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
       InpCloseMinProfitMoney < 0.0 ||
@@ -117,7 +117,8 @@ int OnInit()
          " | opening levels/side=", InpOrdersPerSide,
          " | step=", DoubleToString(GridStepPrice(), _Digits),
          " (", InpPriceStepCents, " cents)",
-         " | lot factors=1x,+", DoubleToString(InpLotFactorStep, 2), "x per level");
+         " | level 1 lot=manual entry lot on both sides, level>=2 lot=(2*level-1) x ",
+         DoubleToString(InpFixedLotUnit, 8));
    Print("OneClickGrid: main gate = ", InpUseRecoveryFormula
          ? "winning side must hold >= 2k+1 positions (k = losing positions)"
          : "disabled");
@@ -232,23 +233,24 @@ void ProcessManualEntryDeal(const ulong dealTicket)
 
    int placed = 0;
 
-   // The manual position is level 1. With factor step 2, levels use the
-   // odd-number sequence 1x, 3x, 5x, 7x, 9x on both sides.
+   // The manual position is level 1: any lot the user opened with. Level 2
+   // and beyond use a fixed lot progression independent of the manual lot
+   // (odd multiples of InpFixedLotUnit: 3,5,7,9,... ).
    for(int level=2; level<=InpOrdersPerSide; level++)
      {
       double price = manualPrice + direction * (level - 1) * GridStepPrice();
-      double lot   = manualLot * LotFactorForLevel(level);
+      double lot   = LotForLevel(level, manualLot);
       if(PlaceStopOrder(direction, level, manualOrderTicket, price, lot))
          placed++;
      }
 
-   // The opposite side keeps the same fixed opening count and restarts the
-   // odd-number lot sequence from 1x at its own first pending level.
+   // The opposite side's first pending order matches the manual entry's
+   // lot exactly (level 1), then follows the same fixed lot progression.
    int oppositeDirection = -direction;
    for(int level=1; level<=InpOrdersPerSide; level++)
      {
       double price = manualPrice + oppositeDirection * level * GridStepPrice();
-      double lot   = manualLot * LotFactorForLevel(level);
+      double lot   = LotForLevel(level, manualLot);
       if(PlaceStopOrder(oppositeDirection, level, manualOrderTicket, price, lot))
          placed++;
      }
@@ -258,9 +260,14 @@ void ProcessManualEntryDeal(const ulong dealTicket)
   }
 
 //+------------------------------------------------------------------+
-double LotFactorForLevel(const int level)
+double LotForLevel(const int level, const double manualLot)
   {
-   return(1.0 + (level - 1) * InpLotFactorStep);
+   // Level 1 (either side) always mirrors the manual entry's own lot.
+   // Level 2+ is a fixed lot progression, independent of the manual lot:
+   // odd multiples of InpFixedLotUnit -> 3,5,7,9,11,13,15,17,...
+   if(level <= 1)
+      return(manualLot);
+   return((2 * level - 1) * InpFixedLotUnit);
   }
 
 //+------------------------------------------------------------------+

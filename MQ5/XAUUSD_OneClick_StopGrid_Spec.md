@@ -4,9 +4,9 @@
 
 - Attach `XAUUSD_OneClick_StopGrid_EA.mq5` to the intended gold-symbol chart on an MT5 hedging account.
 - A newly filled manual market order (`Magic = 0`) on that chart symbol is the trigger and level 1 of its direction.
-- With `InpOrdersPerSide = 5`, a manual buy creates four Buy Stops above the manual fill and five Sell Stops below it. A manual sell creates four Sell Stops below and five Buy Stops above.
+- With `InpOrdersPerSide = 7` (default), a manual buy creates six Buy Stops above the manual fill and seven Sell Stops below it. A manual sell creates six Sell Stops below and seven Buy Stops above.
 - `InpPriceStepCents` uses price cents rather than broker points. Its default `200` is a direct `2.000` price distance and creates levels such as 4000, 4002, and 4004 regardless of quote digits.
-- Opening lots use an independent odd-number sequence on each side. With `InpLotFactorStep = 2.0`, the manual side is `1x, 3x, 5x, 7x, 9x`; the opposite pending side restarts at `1x, 3x, 5x, 7x, 9x`.
+- Opening lots: level 1 on each side (the manual entry, and the opposite side's first pending order) always uses the manual entry's own lot — open it at whatever size you want, and the opposite side's first Stop matches it exactly. Level 2 and beyond use a fixed lot progression that is independent of the manual lot: odd multiples of `InpFixedLotUnit` (default `0.01`) — `3, 5, 7, 9, 11, 13, 15, 17, ...` i.e. `0.03, 0.05, 0.07, 0.09, 0.11, 0.13, 0.15, 0.17 lot`. Both sides follow the same fixed progression from level 2 onward.
 ### Basket exit rules
 
 Exit distances use the same price-cent unit as the grid: `150` means a `1.500` price move, `100` means `1.000`. Every rule below measures the move of the **newest position on the profitable side**, not of the basket as a whole.
@@ -30,7 +30,7 @@ Both cases delete the basket's remaining tagged pending orders when they act, an
 
 - The EA has no automatic maximum-loss ceiling, basket liquidation, or daily-loss protection. No rule is triggered by loss: CASE 2 submits a market close only after the winning side satisfies the gate and the profit distance, so a basket that never produces that winner is never closed by the EA. `InpStopLossDistance` is the only optional loss exit created for each EA pending order, and its default `0.0` disables that SL.
 - The two basket exit rules are the only portfolio-management path. CASE 1 modifies owned positions with a common SL/TP line and submits no market close; CASE 2 is the only place where the EA closes positions at market, and it closes the whole basket at once.
-- Basket ownership, the CASE 1 protection line, and the CASE 2 exit latch persist through restart. Version 1.22 ignores and removes legacy percentage, fixed-loss, daily-loss, and liquidation fields, so attaching it cannot resume an old risk-triggered closure.
+- Basket ownership, the CASE 1 protection line, and the CASE 2 exit latch persist through restart. Version 1.23 ignores and removes legacy percentage, fixed-loss, daily-loss, and liquidation fields, so attaching it cannot resume an old risk-triggered closure.
 - Use one EA instance per account/server/symbol/magic scope. Persistence uses terminal Global Variables; copying the EA to another terminal or deleting these variables does not transfer or preserve saved basket state.
 - With `InpUseFormulaClose = false` and no per-order SL, open positions have no EA-managed automatic loss exit. Increasing grid lots can therefore create unbounded losses; evaluate only in an isolated demo/test environment until independently validated.
 
@@ -44,12 +44,14 @@ Both cases delete the basket's remaining tagged pending orders when they act, an
 
 ## Example
 
-For a manual Buy at 4000 with 0.01 lot, five levels per side, `InpPriceStepCents = 200`, and `InpLotFactorStep = 2.0`:
+For a manual Buy at 4000 with 0.02 lot, seven levels per side, `InpPriceStepCents = 200`, and `InpFixedLotUnit = 0.01`:
 
 | Side | Prices | Lots |
 | --- | --- | --- |
-| Buy | 4000 manual, then Buy Stops at 4002, 4004, 4006, 4008 | 0.01, 0.03, 0.05, 0.07, 0.09 |
-| Sell | Sell Stops at 3998, 3996, 3994, 3992, 3990 | 0.01, 0.03, 0.05, 0.07, 0.09 |
+| Buy | 4000 manual, then Buy Stops at 4002, 4004, 4006, 4008, 4010, 4012 | 0.02, 0.03, 0.05, 0.07, 0.09, 0.11, 0.13 |
+| Sell | Sell Stops at 3998, 3996, 3994, 3992, 3990, 3988, 3986 | 0.02, 0.03, 0.05, 0.07, 0.09, 0.11, 0.13 |
+
+The manual lot (`0.02` here) sets only level 1 on both sides; levels 2-7 are the same fixed `0.03, 0.05, 0.07, 0.09, 0.11, 0.13` regardless of what the manual lot was.
 
 With a standard 100-ounce XAUUSD contract, three straight Buy winners at 4000/4002/4004 and a close just above 4005 produce approximately `$5 + $9 + $5 = $19` gross before spread, commission, swap, slippage, and any opposite-side loss.
 
