@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.26"
+#property version   "1.30"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -25,13 +25,9 @@ input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distan
 input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distance from each pending entry price
 
 input group "=== Basket Exit Rules ==="
-input bool     InpUseFormulaClose       = true;    // Master switch for both basket exit rules
-input bool     InpUseRecoveryFormula    = true;    // MAIN GATE: winning side count >= 2 * losing count + 1
-input int      InpConsecutiveWinners    = 3;       // CASE 1 (k = 0) minimum winning-side positions
-input int      InpWinnerMoveCents       = 200;     // CASE 1 last-winner move in price cents; 200 = 2.000 (4000 -> 4002)
-input int      InpProfitLockCents       = 140;     // CASE 1 locked SL distance in price cents; 140 = 1.400 (SL 4001.4)
-input int      InpLossExitMoveCents     = 200;     // CASE 2 (k > 0) last-winner move that closes the basket at market
-input double   InpCloseMinProfitMoney   = 0.0;     // CASE 1 only; basket floating profit must exceed this before arming
+input bool     InpUseFormulaClose       = true;    // Master switch for every basket exit rule
+input bool     InpUseRecoveryFormula    = true;    // SAFETY BREAKER gate: winning side count >= 2 * losing count + 1
+input int      InpTrailArmCents         = 150;     // TRAILING layer 2 distance past the newest entry in price cents; 150 = 1.500
 input int      InpMaxLosersBeforeCut    = 3;       // LOSER CUT: 0 = disabled; otherwise close everything once this many losers exist and the newest one is passed
 input int      InpLoserCutMoveCents     = 200;     // LOSER CUT adverse move past the newest losing entry in price cents; 200 = 2.000
 
@@ -54,10 +50,10 @@ struct CloseBasket
   {
    ulong rootOrderTicket;
    ulong manualPositionId;
-   bool  protectionArmed;      // CASE 1 latch: locked SL/TP line is active
+   bool  protectionArmed;      // a trailing SL/TP line is live on this basket
    int   protectionDirection;
    double protectionPrice;
-   bool  marketExitRequested;  // CASE 2 latch: close every position at market
+   bool  marketExitRequested;  // hard-exit latch: close every position at market
    datetime startTime;
   };
 CloseBasket g_closeBaskets[];
@@ -69,10 +65,7 @@ int OnInit()
       InpPriceStepCents <= 0 || InpFixedLotUnit <= 0.0 ||
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
-      InpCloseMinProfitMoney < 0.0 ||
-      InpWinnerMoveCents <= 0 || InpProfitLockCents <= 0 ||
-      InpLossExitMoveCents <= 0 ||
-      InpConsecutiveWinners < 1 ||
+      InpTrailArmCents <= 0 ||
       InpMaxLosersBeforeCut < 0 ||
       (InpMaxLosersBeforeCut > 0 && InpLoserCutMoveCents <= 0) ||
       InpExpirationHours < 0)
@@ -81,9 +74,9 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
      }
 
-   if(InpProfitLockCents >= InpWinnerMoveCents)
+   if(InpTrailArmCents >= InpPriceStepCents)
      {
-      Print("OneClickGrid: InpProfitLockCents must stay below InpWinnerMoveCents so the locked SL sits behind the qualifying price");
+      Print("OneClickGrid: InpTrailArmCents must stay below InpPriceStepCents so the layer 2 line sits inside one grid step");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
@@ -123,20 +116,16 @@ int OnInit()
          " (", InpPriceStepCents, " cents)",
          " | level 1 lot=manual entry lot on both sides, level>=2 lot=(2*level-1) x ",
          DoubleToString(InpFixedLotUnit, 8));
-   Print("OneClickGrid: main gate = ", InpUseRecoveryFormula
-         ? "winning side must hold >= 2k+1 positions (k = losing positions)"
-         : "disabled");
+   Print("OneClickGrid: TRAILING layer 1 = protect at the previous position's entry as soon as a second position exists");
+   Print("OneClickGrid: TRAILING layer 2 = move the line to ",
+         DoubleToString(TrailArmPrice(), _Digits),
+         " past the newest entry once price has travelled that far;",
+         " the line never moves back and pending orders stay alive");
    if(InpUseRecoveryFormula)
       Print("OneClickGrid: SAFETY BREAKER = market-close the basket once k > ",
             (int)((InpOrdersPerSide - 1) / 2),
-            " losing positions, since the gate can no longer be satisfied within ",
+            " losing positions, since 2k+1 can no longer be satisfied within ",
             InpOrdersPerSide, " levels/side");
-   Print("OneClickGrid: CASE 1 (k = 0) = ", InpConsecutiveWinners,
-         " winners and the last winner past ", DoubleToString(WinnerMovePrice(), _Digits),
-         " arm a locked SL at ", DoubleToString(ProfitLockPrice(), _Digits),
-         " from that entry");
-   Print("OneClickGrid: CASE 2 (k > 0) = close the whole basket at market once the last winner moves past ",
-         DoubleToString(LossExitMovePrice(), _Digits));
    Print("OneClickGrid: LOSER CUT = ", InpMaxLosersBeforeCut > 0
          ? StringFormat("close everything once k >= %d and price runs %s past the newest losing entry",
                         InpMaxLosersBeforeCut, DoubleToString(LoserCutMovePrice(), _Digits))
@@ -292,23 +281,11 @@ double GridStepPrice()
   }
 
 //+------------------------------------------------------------------+
-double WinnerMovePrice()
+double TrailArmPrice()
   {
    // Exit distances share the grid's price-cent unit and deliberately ignore
    // broker _Point: 150 always means 4000 -> 4001.5.
-   return(InpWinnerMoveCents / 100.0);
-  }
-
-//+------------------------------------------------------------------+
-double ProfitLockPrice()
-  {
-   return(InpProfitLockCents / 100.0);
-  }
-
-//+------------------------------------------------------------------+
-double LossExitMovePrice()
-  {
-   return(InpLossExitMoveCents / 100.0);
+   return(InpTrailArmCents / 100.0);
   }
 
 //+------------------------------------------------------------------+
@@ -844,7 +821,7 @@ void LoadPersistentBaskets()
          ReadStateValue(BasketStateKey(i, "X"), marketExitValue) && marketExitValue > 0.5)
         {
          g_closeBaskets[index].marketExitRequested = true;
-         Print("OneClickGrid: restored CASE 2 market-exit latch #", root,
+         Print("OneClickGrid: restored market-exit latch #", root,
                "; the basket is closed on the next tick");
         }
      }
@@ -949,13 +926,22 @@ bool BasketHasOpenState(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
-bool GetLastWinnerOpenPrice(const CloseBasket &basket,
-                            const int direction,
-                            double &lastOpenPrice)
+bool IsBetterLine(const double candidate, const double current, const int direction)
   {
-   long latestTimeMsc = -1;
-   ulong latestTicket = 0;
-   lastOpenPrice = 0.0;
+   // "Better" means further from the market in the protective direction.
+   return((direction == 1) ? (candidate > current) : (candidate < current));
+  }
+
+//+------------------------------------------------------------------+
+bool GetTrailingAnchors(const CloseBasket &basket,
+                        const int direction,
+                        double &newestEntry,
+                        double &previousEntry)
+  {
+   long  newestTimeMsc = -1, previousTimeMsc = -1;
+   ulong newestTicket = 0, previousTicket = 0;
+   newestEntry = 0.0;
+   previousEntry = 0.0;
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -969,14 +955,26 @@ bool GetLastWinnerOpenPrice(const CloseBasket &basket,
          continue;
 
       long timeMsc = PositionGetInteger(POSITION_TIME_MSC);
-      if(timeMsc > latestTimeMsc || (timeMsc == latestTimeMsc && ticket > latestTicket))
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      if(timeMsc > newestTimeMsc || (timeMsc == newestTimeMsc && ticket > newestTicket))
         {
-         latestTimeMsc = timeMsc;
-         latestTicket = ticket;
-         lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         previousTimeMsc = newestTimeMsc;
+         previousTicket = newestTicket;
+         previousEntry = newestEntry;
+         newestTimeMsc = timeMsc;
+         newestTicket = ticket;
+         newestEntry = openPrice;
+        }
+      else if(timeMsc > previousTimeMsc || (timeMsc == previousTimeMsc && ticket > previousTicket))
+        {
+         previousTimeMsc = timeMsc;
+         previousTicket = ticket;
+         previousEntry = openPrice;
         }
      }
-   return(lastOpenPrice > 0.0);
+
+   return(newestEntry > 0.0);
   }
 
 //+------------------------------------------------------------------+
@@ -1056,8 +1054,8 @@ void CloseBasketAtMarket(const CloseBasket &basket)
 //+------------------------------------------------------------------+
 void ApplyBasketProtection(const CloseBasket &basket)
   {
-   DeleteBasketPendingOrders(basket);
-
+   // Pending orders are deliberately left alive: the protective line trails,
+   // so the grid must stay able to extend while the basket is protected.
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double stopsDistance = MathMax(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
@@ -1126,17 +1124,80 @@ void ApplyBasketProtection(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
+//| Two-layer trailing protection.                                    |
+//|  Layer 1 - the previous position's entry, usable the moment a     |
+//|            second position exists on the winning side. It costs   |
+//|            the newest position one grid step, but needs no price  |
+//|            movement at all, so the basket is never unprotected.   |
+//|  Layer 2 - TrailArmPrice() beyond the newest entry, once price    |
+//|            has actually travelled that far. This locks profit on  |
+//|            every position, the newest one included.               |
+//| The better of the two wins, and the line only ever moves away     |
+//| from the market so protection can never be given back.            |
+//+------------------------------------------------------------------+
+void UpdateTrailingProtection(CloseBasket &basket, const int direction)
+  {
+   double newestEntry, previousEntry;
+   if(!GetTrailingAnchors(basket, direction, newestEntry, previousEntry))
+      return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+
+   double candidate = 0.0;
+   bool haveCandidate = false;
+   string layer = "";
+
+   if(previousEntry > 0.0)
+     {
+      candidate = previousEntry;
+      haveCandidate = true;
+      layer = "layer 1 - previous entry";
+     }
+
+   double armedLine = newestEntry + direction * TrailArmPrice();
+   bool layer2Ready = (direction == 1) ? (bid > armedLine) : (ask < armedLine);
+   if(layer2Ready && (!haveCandidate || IsBetterLine(armedLine, candidate, direction)))
+     {
+      candidate = armedLine;
+      haveCandidate = true;
+      layer = "layer 2 - newest entry + trail";
+     }
+
+   if(!haveCandidate)
+      return;
+
+   double line = NormalizePriceForDirection(candidate, -direction);
+
+   if(basket.protectionArmed && basket.protectionDirection == direction &&
+      !IsBetterLine(line, basket.protectionPrice, direction))
+      return;
+
+   basket.protectionArmed = true;
+   basket.protectionDirection = direction;
+   basket.protectionPrice = line;
+   SavePersistentState();
+
+   Print("OneClickGrid: trailing line #", basket.rootOrderTicket,
+         " -> ", DoubleToString(line, _Digits),
+         " | ", layer,
+         " | direction=", direction,
+         " | newest entry=", DoubleToString(newestEntry, _Digits));
+  }
+
+//+------------------------------------------------------------------+
 void ManageFormulaClose()
   {
    for(int b=ArraySize(g_closeBaskets)-1; b>=0; b--)
      {
-      // Both latches are retried every tick until the basket is empty.
-      if(g_closeBaskets[b].marketExitRequested || g_closeBaskets[b].protectionArmed)
+      // The market-exit latch is retried every tick until the basket is
+      // empty. The protective line is deliberately NOT a latch: it has to
+      // keep trailing, so it falls through to the rules below.
+      if(g_closeBaskets[b].marketExitRequested)
         {
-         if(g_closeBaskets[b].marketExitRequested)
-            CloseBasketAtMarket(g_closeBaskets[b]);
-         else
-            ApplyBasketProtection(g_closeBaskets[b]);
+         CloseBasketAtMarket(g_closeBaskets[b]);
 
          if(!BasketHasOpenState(g_closeBaskets[b]))
            {
@@ -1152,7 +1213,13 @@ void ManageFormulaClose()
                      losingCount);
 
       if(buyCount + sellCount == 0)
+        {
+         // The protective line took every position out. Retire the leftover
+         // pendings so a later fill cannot silently restart the basket.
+         if(g_closeBaskets[b].protectionArmed)
+            DeleteBasketPendingOrders(g_closeBaskets[b]);
          continue;
+        }
 
       // LOSER CUT - hard loss stop, evaluated before every other rule. Once
       // the basket carries InpMaxLosersBeforeCut losing positions and price
@@ -1179,12 +1246,11 @@ void ManageFormulaClose()
            }
         }
 
-      // SAFETY BREAKER - the main gate needs winnerCount >= 2*losingCount+1,
+      // SAFETY BREAKER - a recovery needs winnerCount >= 2*losingCount+1,
       // but winnerCount can never exceed InpOrdersPerSide (the grid's own
-      // level cap). Once losingCount grows past that ceiling the gate can
-      // mathematically never be satisfied again, so CASE 1/2 would never
-      // fire and the basket would sit open indefinitely while price whips
-      // back and forth. Cut losses now instead of waiting forever.
+      // level cap). Once losingCount grows past that ceiling the basket can
+      // no longer trade its way out, so cut the loss here rather than hold
+      // an unrecoverable basket while price whips back and forth.
       if(InpUseRecoveryFormula && losingCount > 0 &&
          2 * losingCount + 1 > InpOrdersPerSide)
         {
@@ -1199,8 +1265,8 @@ void ManageFormulaClose()
          continue;
         }
 
-      // The winning side is the profitable direction; k is the number of
-      // losing positions currently held by the basket.
+      // The winning side is the profitable direction; the protective line
+      // trails behind whichever side that is.
       int winningDirection = 0;
       if(buyProfit > 0.0 && sellProfit > 0.0)
          winningDirection = (buyProfit >= sellProfit) ? 1 : -1;
@@ -1208,78 +1274,16 @@ void ManageFormulaClose()
          winningDirection = 1;
       else if(sellProfit > 0.0)
          winningDirection = -1;
+
+      // With no profitable side there is nothing new to trail behind, but a
+      // line already sitting on the broker keeps protecting the basket.
       if(winningDirection == 0)
          continue;
 
-      int winnerCount = (winningDirection == 1) ? buyCount : sellCount;
+      UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
 
-      // MAIN GATE - the winning side must hold at least 2k+1 positions.
-      if(InpUseRecoveryFormula && winnerCount < 2 * losingCount + 1)
-         continue;
-
-      // Both cases measure the move of the newest position on the winning
-      // side, not of the basket as a whole.
-      double lastWinnerOpenPrice;
-      if(!GetLastWinnerOpenPrice(g_closeBaskets[b], winningDirection, lastWinnerOpenPrice))
-         continue;
-
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double lastWinnerMove = (winningDirection == 1)
-         ? (bid - lastWinnerOpenPrice)
-         : (lastWinnerOpenPrice - ask);
-
-      // CASE 2 - the basket still carries a losing position. Once the last
-      // winner has moved past the exit distance the whole basket is closed
-      // at market, regardless of net P/L.
-      if(losingCount > 0)
-        {
-         if(lastWinnerMove <= LossExitMovePrice())
-            continue;
-
-         Print("OneClickGrid: CASE 2 market exit #", g_closeBaskets[b].rootOrderTicket,
-               " | Buy=", buyCount, " Sell=", sellCount,
-               " | winners=", winnerCount, " k=", losingCount,
-               " | last winner=", DoubleToString(lastWinnerOpenPrice, _Digits),
-               " moved ", DoubleToString(lastWinnerMove, _Digits),
-               " | net=", DoubleToString(netProfit, 2));
-         g_closeBaskets[b].marketExitRequested = true;
-         SavePersistentState();
-         CloseBasketAtMarket(g_closeBaskets[b]);
-         continue;
-        }
-
-      // CASE 1 - no losing position (for example 3 winners and 0 losers).
-      // The last winner's move arms a locked exit at the shorter
-      // profit-lock distance from that position's entry price.
-      if(winnerCount < InpConsecutiveWinners ||
-         lastWinnerMove <= WinnerMovePrice() ||
-         netProfit <= InpCloseMinProfitMoney)
-         continue;
-
-      double rawProtectionPrice = lastWinnerOpenPrice + winningDirection * ProfitLockPrice();
-      double protectionPrice = NormalizePriceForDirection(rawProtectionPrice, -winningDirection);
-
-      // The market must be strictly beyond the locked line before it can
-      // become the basket's protected exit.
-      bool marketBeyondProtection = (winningDirection == 1)
-         ? (bid > protectionPrice)
-         : (ask < protectionPrice);
-      if(!marketBeyondProtection)
-         continue;
-
-      Print("OneClickGrid: CASE 1 profit lock armed #", g_closeBaskets[b].rootOrderTicket,
-            " | Buy=", buyCount, " Sell=", sellCount,
-            " | winners=", winnerCount, " k=0",
-            " | last winner=", DoubleToString(lastWinnerOpenPrice, _Digits),
-            " moved ", DoubleToString(lastWinnerMove, _Digits),
-            " | locked exit=", DoubleToString(protectionPrice, _Digits),
-            " | net=", DoubleToString(netProfit, 2));
-      g_closeBaskets[b].protectionArmed = true;
-      g_closeBaskets[b].protectionDirection = winningDirection;
-      g_closeBaskets[b].protectionPrice = protectionPrice;
-      SavePersistentState();
-      ApplyBasketProtection(g_closeBaskets[b]);
+      if(g_closeBaskets[b].protectionArmed)
+         ApplyBasketProtection(g_closeBaskets[b]);
      }
   }
 //+------------------------------------------------------------------+
