@@ -17,9 +17,11 @@ Exit distances use the same price-cent unit as the grid: `200` means a `2.000` p
 
 The basket carries **one** protective price line, applied to every position at once: an SL on positions in the winning direction and a TP at the same price on opposite-direction positions, because MT5 cannot place an SL on the far side of the market. When price touches the line the whole basket closes together.
 
-Two layers compete to set that line, and the better of the two wins:
+**Neither layer runs until the winning side holds two positions.** A lone manual entry is not a grid yet: trailing it would park the line `1.500` behind that entry and close the basket for a token profit before level 2 could fill at `3.000`, so the grid would never develop. The manual position therefore carries no trailing line of its own — the first line appears when the second position on its side fills.
 
-- **Layer 1 — the previous position's entry.** Available the moment a second position exists on the winning side, with no price movement required, so the basket is never left unprotected. It costs the newest position one grid step, which the older positions' gains cover.
+Two layers then compete to set that line, and the better of the two wins:
+
+- **Layer 1 — the previous position's entry.** Available the moment that second position exists, with no price movement required, so an established grid is never left unprotected. It costs the newest position one grid step, which the older positions' gains cover.
 - **Layer 2 — `InpTrailArmCents` (`1.500`) past the newest entry.** Applies once price has actually travelled that far, and locks profit on every position including the newest.
 
 Two properties make this work:
@@ -75,7 +77,7 @@ If every level on both sides fills, the basket carries roughly `1.00` lot in tot
 
 | Event | Line sits at | Set by |
 | --- | --- | --- |
-| Only the manual position is open | no line yet | there is no previous entry to use |
+| Only the manual position is open | no line yet | trailing needs two positions on the side |
 | Level 2 fills at 4003 | 4000 | layer 1 |
 | Bid passes 4004.5 | 4004.5 | layer 2 (`4003 + 1.500`) |
 | Level 3 fills at 4006 | 4004.5 | unchanged; layer 1 would say 4003, which is worse |

@@ -1147,28 +1147,23 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
    if(bid <= 0.0 || ask <= 0.0)
       return;
 
-   double candidate = 0.0;
-   bool haveCandidate = false;
-   string layer = "";
+   // A single position is not a grid yet. Trailing it would park the line
+   // TrailArmPrice() behind the manual entry and close the basket for a
+   // token profit before the next level can even fill, so both layers wait
+   // until this side actually holds two positions.
+   if(previousEntry <= 0.0)
+      return;
 
-   if(previousEntry > 0.0)
-     {
-      candidate = previousEntry;
-      haveCandidate = true;
-      layer = "layer 1 - previous entry";
-     }
+   double candidate = previousEntry;
+   string layer = "layer 1 - previous entry";
 
    double armedLine = newestEntry + direction * TrailArmPrice();
    bool layer2Ready = (direction == 1) ? (bid > armedLine) : (ask < armedLine);
-   if(layer2Ready && (!haveCandidate || IsBetterLine(armedLine, candidate, direction)))
+   if(layer2Ready && IsBetterLine(armedLine, candidate, direction))
      {
       candidate = armedLine;
-      haveCandidate = true;
       layer = "layer 2 - newest entry + trail";
      }
-
-   if(!haveCandidate)
-      return;
 
    double line = NormalizePriceForDirection(candidate, -direction);
 
@@ -1176,10 +1171,17 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
       !IsBetterLine(line, basket.protectionPrice, direction))
       return;
 
+   bool firstArm = !basket.protectionArmed;
    basket.protectionArmed = true;
    basket.protectionDirection = direction;
    basket.protectionPrice = line;
-   SavePersistentState();
+
+   // Only the initial arm is flushed to disk. Trailing writes every tick
+   // would flush constantly, and the exact line does not need to survive a
+   // restart: it is re-derived from the open positions, while the
+   // broker-side SL is ratcheted by MathMax/MathMin and cannot regress.
+   if(firstArm)
+      SavePersistentState();
 
    Print("OneClickGrid: trailing line #", basket.rootOrderTicket,
          " -> ", DoubleToString(line, _Digits),
