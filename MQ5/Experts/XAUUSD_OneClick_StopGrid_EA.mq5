@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.32"
+#property version   "1.33"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -28,6 +28,7 @@ input group "=== Basket Exit Rules ==="
 input bool     InpUseFormulaClose       = true;    // Master switch for every basket exit rule
 input bool     InpUseRecoveryFormula    = true;    // SAFETY BREAKER gate: winning side count >= 2 * losing count + 1
 input int      InpTrailArmCents         = 150;     // TRAILING layer 2 distance past the newest entry in price cents; 150 = 1.500
+input int      InpProfitExitMoveCents   = 200;     // PROFIT EXIT (k > 0 only): close everything once the newest winner runs this far; 200 = 2.000
 input int      InpMaxLosersBeforeCut    = 3;       // LOSER CUT: 0 = disabled; otherwise close everything once this many losers exist and the newest one is passed
 input int      InpLoserCutMoveCents     = 200;     // LOSER CUT adverse move past the newest losing entry in price cents; 200 = 2.000
 
@@ -67,6 +68,7 @@ int OnInit()
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
       InpMaxSpreadPrice < 0.0 ||
       InpTrailArmCents <= 0 ||
+      InpProfitExitMoveCents <= 0 ||
       InpMaxLosersBeforeCut < 0 ||
       (InpMaxLosersBeforeCut > 0 && InpLoserCutMoveCents <= 0) ||
       InpExpirationHours < 0)
@@ -122,6 +124,10 @@ int OnInit()
          DoubleToString(TrailArmPrice(), _Digits),
          " past the newest entry once price has travelled that far;",
          " the line never moves back and pending orders stay alive");
+   Print("OneClickGrid: PROFIT EXIT = with k > 0 and a winning side of 2k+1,",
+         " close everything at market once the newest winner runs ",
+         DoubleToString(ProfitExitMovePrice(), _Digits),
+         "; a k = 0 basket is left to the trailing line instead");
    if(InpUseRecoveryFormula)
       Print("OneClickGrid: SAFETY BREAKER = market-close the basket once k > ",
             (int)((InpOrdersPerSide - 1) / 2),
@@ -287,6 +293,12 @@ double TrailArmPrice()
    // Exit distances share the grid's price-cent unit and deliberately ignore
    // broker _Point: 150 always means 4000 -> 4001.5.
    return(InpTrailArmCents / 100.0);
+  }
+
+//+------------------------------------------------------------------+
+double ProfitExitMovePrice()
+  {
+   return(InpProfitExitMoveCents / 100.0);
   }
 
 //+------------------------------------------------------------------+
@@ -1294,6 +1306,45 @@ void ManageFormulaClose()
       // line already sitting on the broker keeps protecting the basket.
       if(winningDirection == 0)
          continue;
+
+      int winnerCount = (winningDirection == 1) ? buyCount : sellCount;
+
+      // PROFIT EXIT - a basket that still carries losers banks its recovery
+      // instead of pressing it: once the winning side is big enough to
+      // cover them (2k+1, e.g. 3-1 or 5-2) and its newest position has run
+      // ProfitExitMovePrice(), everything closes at market. A clean basket
+      // (k = 0) deliberately does NOT do this - it is left to the trailing
+      // line so a real trend is never cut short.
+      if(losingCount > 0 &&
+         (!InpUseRecoveryFormula || winnerCount >= 2 * losingCount + 1))
+        {
+         double newestWinnerEntry, previousWinnerEntry;
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+         if(bid > 0.0 && ask > 0.0 &&
+            GetTrailingAnchors(g_closeBaskets[b], winningDirection,
+                               newestWinnerEntry, previousWinnerEntry))
+           {
+            double winnerMove = (winningDirection == 1)
+               ? (bid - newestWinnerEntry)
+               : (newestWinnerEntry - ask);
+
+            if(winnerMove >= ProfitExitMovePrice())
+              {
+               Print("OneClickGrid: PROFIT EXIT market close #", g_closeBaskets[b].rootOrderTicket,
+                     " | Buy=", buyCount, " Sell=", sellCount,
+                     " | winners=", winnerCount, " k=", losingCount,
+                     " | newest winner=", DoubleToString(newestWinnerEntry, _Digits),
+                     " ran ", DoubleToString(winnerMove, _Digits),
+                     " | net=", DoubleToString(netProfit, 2));
+               g_closeBaskets[b].marketExitRequested = true;
+               SavePersistentState();
+               CloseBasketAtMarket(g_closeBaskets[b]);
+               continue;
+              }
+           }
+        }
 
       UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
 

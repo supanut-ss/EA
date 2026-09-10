@@ -29,6 +29,10 @@ Two properties make this work:
 - **The line only moves away from the market, never back toward it.** Protection once gained is never given up.
 - **Pending orders are left alive.** The grid keeps extending while the basket is protected, so a long trend keeps adding levels instead of being cut short. Only a market exit (loser cut or safety breaker) deletes pendings — plus a cleanup whenever a basket is left holding no positions at all, whether the line took them out or the user closed them by hand, so live stop orders can never silently re-enter a basket that is already finished.
 
+**Profit exit — bank the recovery (`k > 0` only).** Once a basket that still carries losers has a winning side large enough to cover them (`N >= 2k + 1`, so a 3-1 or a 5-2) **and** its newest winning position has run `InpProfitExitMoveCents = 200` (`2.000`) past its own entry, the whole basket closes at market. The split is deliberate: a mixed basket takes the recovery rather than pressing it, while a **clean `k = 0` basket never triggers this** and is left to the trailing line so a genuine trend is not cut short at `2.000`. Setting `InpUseRecoveryFormula = false` drops the `2k + 1` requirement and lets any `k > 0` basket exit on the distance alone.
+
+A 3-0 basket needs no rule of its own here: trailing layer 2 already parks the line at `InpTrailArmCents` (`1.500`) past the newest entry, which is exactly the "move the stop to 150" behaviour, and it keeps moving up as further levels fill.
+
 **Loser cut — hard loss stop.** Evaluated before every other rule. Once the basket holds `InpMaxLosersBeforeCut = 3` losing positions **and** price has run `InpLoserCutMoveCents = 200` (`2.000`) past the entry of the **newest** of them, the whole basket is closed at market — winners and losers alike, no gate check, no net-P/L check. With the default `3.000` grid this fires at `2.000` adverse, i.e. before the next adverse level at `3.000` can fill, so the losing side is structurally prevented from growing to a 4th position. Set `InpMaxLosersBeforeCut = 0` to disable.
 
 **Safety breaker — recovery unreachable.** A basket trades its way out when the winning side reaches `2k + 1` positions, but that count can never exceed `InpOrdersPerSide`. Once `k` grows past `(InpOrdersPerSide - 1) / 2` the recovery is arithmetically out of reach: with `InpOrdersPerSide = 7`, that is `k >= 4` (needs 9 winners, but at most 7 can ever exist). Rather than hold an unrecoverable basket, the EA closes it at market the instant `2k + 1 > InpOrdersPerSide`. This only runs while `InpUseRecoveryFormula = true`, and with the loser cut firing first at `k = 3` it is a backstop that should rarely be reached.
@@ -46,8 +50,8 @@ Behaviour common to the market exits:
 ### Exit safety and persistence
 
 - The loser cut is the EA's only loss-triggered exit and it is measured in price distance, not money: it bounds how far the losing side may run, not the account's currency drawdown. There is still no equity-percentage ceiling and no daily-loss protection, and every rule is **per basket** — opening several manual entries creates several independent baskets whose risk adds up. `InpStopLossDistance` remains the only optional per-position loss exit, and its default `0.0` disables that SL.
-- The three basket exit rules (trailing protection, loser cut, safety breaker) are the only portfolio-management path, and all of them live inside `ManageFormulaClose()`, so `InpUseFormulaClose = false` disables the loss-triggered exits too. Trailing protection modifies owned positions with a common SL/TP line and submits no market close; the loser cut and the safety breaker are the places where the EA closes positions at market, and each closes the whole basket at once.
-- Basket ownership, the trailing protection line, and the market-exit latch persist through restart. Version 1.31 ignores and removes legacy percentage, fixed-loss, daily-loss, and liquidation fields, so attaching it cannot resume an old risk-triggered closure.
+- The four basket exit rules (trailing protection, profit exit, loser cut, safety breaker) are the only portfolio-management path, and all of them live inside `ManageFormulaClose()`, so `InpUseFormulaClose = false` disables every one of them. Trailing protection modifies owned positions with a common SL/TP line and submits no market close; the profit exit, the loser cut and the safety breaker are the places where the EA closes positions at market, and each closes the whole basket at once.
+- Basket ownership, the trailing protection line, and the market-exit latch persist through restart. Version 1.33 ignores and removes legacy percentage, fixed-loss, daily-loss, and liquidation fields, so attaching it cannot resume an old risk-triggered closure.
 - Use one EA instance per account/server/symbol/magic scope. Persistence uses terminal Global Variables; copying the EA to another terminal or deleting these variables does not transfer or preserve saved basket state.
 - With `InpUseFormulaClose = false` and no per-order SL, open positions have no EA-managed automatic loss exit. Increasing grid lots can therefore create unbounded losses; evaluate only in an isolated demo/test environment until independently validated.
 
@@ -93,6 +97,11 @@ If every level on both sides fills, the basket carries roughly `1.00` lot in tot
 | 2 Buy positions, newest opened 4003, Bid 4004.4 | trailing | Line held at 4000 (layer 1); layer 2 needs 4004.5 |
 | 3 Buy positions, newest opened 4006, Bid 4007.6 | trailing | Line raised to 4007.5; pendings stay alive |
 | Line at 4007.5, Bid drops through it | trailing | All positions close at 4007.5, then leftover pendings are deleted |
+| 3 winners, 0 losers, newest opened 4006, Bid 4008.1 | trailing | No profit exit at `k = 0`; line simply sits at 4007.5 and the grid runs on |
+| 3 winners, 1 loser, newest winner opened 3991, Ask 3988.9 | profit exit | `3 >= 2(1)+1` and the winner ran 2.1; close everything at market |
+| 3 winners, 1 loser, newest winner opened 3991, Ask 3989.5 | profit exit | Wait; 1.5 has not reached 2.0 |
+| 5 winners, 2 losers, newest winner opened 3985, Ask 3982.9 | profit exit | `5 >= 2(2)+1` and the winner ran 2.1; close everything at market |
+| 4 winners, 2 losers, newest winner ran 3.0 | profit exit | Wait; `4 < 2(2)+1`, the winning side cannot cover the losers yet |
 | 3 losers, newest loser is a Sell opened 3988, Ask 3989.9 | loser cut | Wait; 1.9 has not passed 2.0 |
 | 3 losers, newest loser is a Sell opened 3988, Ask 3990.1 | loser cut | Delete pendings, close the whole basket at market |
 | 3 Buy winners, 4 Sell losers, any price | safety breaker | Needs 9 winners, only 7 possible; close everything at market, no price condition |
