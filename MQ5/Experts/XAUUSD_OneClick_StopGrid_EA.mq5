@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.30"
+#property version   "1.31"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -34,7 +34,7 @@ input int      InpLoserCutMoveCents     = 200;     // LOSER CUT adverse move pas
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
 input int      InpSlippagePoints       = 100;
-input double   InpMaxSpreadPrice       = 0.0;     // 0 = disabled; otherwise reject a grid when spread exceeds this price distance
+input double   InpMaxSpreadPrice       = 0.50;    // 0 = disabled; otherwise reject a grid when spread exceeds this price distance
 input int      InpExpirationHours      = 0;       // 0 = good-till-cancelled
 input int      InpMaxOwnPendingOrders  = 100;     // Safety cap for this EA, symbol, and magic number
 
@@ -65,6 +65,7 @@ int OnInit()
       InpPriceStepCents <= 0 || InpFixedLotUnit <= 0.0 ||
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
+      InpMaxSpreadPrice < 0.0 ||
       InpTrailArmCents <= 0 ||
       InpMaxLosersBeforeCut < 0 ||
       (InpMaxLosersBeforeCut > 0 && InpLoserCutMoveCents <= 0) ||
