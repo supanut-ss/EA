@@ -908,6 +908,18 @@ void GetBasketStats(const CloseBasket &basket,
   }
 
 //+------------------------------------------------------------------+
+bool BasketHasPendingOrders(const CloseBasket &basket)
+  {
+   for(int i=OrdersTotal()-1; i>=0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && OrderBelongsToBasket(basket))
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 bool BasketHasOpenState(const CloseBasket &basket)
   {
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -917,13 +929,7 @@ bool BasketHasOpenState(const CloseBasket &basket)
          return(true);
      }
 
-   for(int i=OrdersTotal()-1; i>=0; i--)
-     {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket > 0 && OrderBelongsToBasket(basket))
-         return(true);
-     }
-   return(false);
+   return(BasketHasPendingOrders(basket));
   }
 
 //+------------------------------------------------------------------+
@@ -1217,10 +1223,16 @@ void ManageFormulaClose()
 
       if(buyCount + sellCount == 0)
         {
-         // The protective line took every position out. Retire the leftover
-         // pendings so a later fill cannot silently restart the basket.
-         if(g_closeBaskets[b].protectionArmed)
+         // No positions left - the protective line took them out, or the
+         // user closed them by hand. Either way the grid has nothing left
+         // to manage, so retire the leftover pendings rather than leave
+         // live stop orders that would silently re-enter later.
+         if(BasketHasPendingOrders(g_closeBaskets[b]))
+           {
+            Print("OneClickGrid: basket #", g_closeBaskets[b].rootOrderTicket,
+                  " holds no positions; deleting its remaining pending orders");
             DeleteBasketPendingOrders(g_closeBaskets[b]);
+           }
          continue;
         }
 

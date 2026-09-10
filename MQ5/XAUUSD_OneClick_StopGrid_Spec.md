@@ -27,7 +27,7 @@ Two layers then compete to set that line, and the better of the two wins:
 Two properties make this work:
 
 - **The line only moves away from the market, never back toward it.** Protection once gained is never given up.
-- **Pending orders are left alive.** The grid keeps extending while the basket is protected, so a long trend keeps adding levels instead of being cut short. Only a market exit (loser cut or safety breaker) deletes pendings — plus a one-off cleanup after the line closes the last position, so a later fill cannot silently restart a finished basket.
+- **Pending orders are left alive.** The grid keeps extending while the basket is protected, so a long trend keeps adding levels instead of being cut short. Only a market exit (loser cut or safety breaker) deletes pendings — plus a cleanup whenever a basket is left holding no positions at all, whether the line took them out or the user closed them by hand, so live stop orders can never silently re-enter a basket that is already finished.
 
 **Loser cut — hard loss stop.** Evaluated before every other rule. Once the basket holds `InpMaxLosersBeforeCut = 3` losing positions **and** price has run `InpLoserCutMoveCents = 200` (`2.000`) past the entry of the **newest** of them, the whole basket is closed at market — winners and losers alike, no gate check, no net-P/L check. With the default `3.000` grid this fires at `2.000` adverse, i.e. before the next adverse level at `3.000` can fill, so the losing side is structurally prevented from growing to a 4th position. Set `InpMaxLosersBeforeCut = 0` to disable.
 
