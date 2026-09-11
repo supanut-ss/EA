@@ -415,6 +415,40 @@ for (const direction of [1, -1]) {
       assert(basket.marketExitRequested && basketCloses === 1, 'budget did not market-exit at exact limit');
       assert(!basket.recoverySLArmed, 'budget must pre-empt recovery arming');
     });
+
+    test(`K trailing matches the ordinary ladder before the recovery stop, k${k} direction ${direction}`, () => {
+      reset(direction);
+      const basket = g_closeBaskets[0];
+      basket.winnerCutDirection = direction;
+      basket.winnerCutAnchorPrice = 4006;
+      basket.bankedLoserCount = k;
+      const recoveryStop = 4006 + direction * (k - 1) * 3;
+      if (direction === 1) { bid = recoveryStop - 1; ask = bid + 0.2; }
+      else { ask = recoveryStop + 1; bid = ask - 0.2; }
+      UpdateTrailingProtection(basket, direction);
+
+      const ordinary = newBasket();
+      UpdateTrailingProtection(ordinary, direction);
+      assert(MathAbs(basket.protectionPrice - ordinary.protectionPrice) < 1e-9,
+        'K-mode trailed tighter than the no-cut ladder before reaching the recovery stop');
+    });
+
+    test(`K trailing improves on the ladder past the recovery stop, k${k} direction ${direction}`, () => {
+      reset(direction);
+      const basket = g_closeBaskets[0];
+      basket.winnerCutDirection = direction;
+      basket.winnerCutAnchorPrice = 4006;
+      basket.bankedLoserCount = k;
+      const recoveryStop = 4006 + direction * (k - 1) * 3;
+      if (direction === 1) { bid = recoveryStop + 1; ask = bid + 0.2; }
+      else { ask = recoveryStop - 1; bid = ask - 0.2; }
+      UpdateTrailingProtection(basket, direction);
+
+      const ordinary = newBasket();
+      UpdateTrailingProtection(ordinary, direction);
+      assert(IsBetterLine(basket.protectionPrice, ordinary.protectionPrice, direction),
+        'K-mode price-following did not improve on the plain ladder past the recovery stop');
+    });
   }
 
   test(`recovery keeps tighter existing line direction ${direction}`, () => {

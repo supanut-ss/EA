@@ -144,7 +144,9 @@ int OnInit()
          " past the newest entry, move the line to that entry + ",
          DoubleToString(InpProtectSpreadBuffer, _Digits),
          "; clean baskets retire all pending orders and then trail price by this distance");
-   Print("OneClickGrid: recovery SL = cut anchor + direction * (k-1) grid steps; arm after price passes SL by ",
+   Print("OneClickGrid: recovery SL = cut anchor + direction * (k-1) grid steps; ",
+         "the survivor trails on the ordinary ladder alone until price reaches that level, ",
+         "then price-following joins in; arm after price passes SL by ",
          DoubleToString(InpRecoverySLArmCents / 100.0, _Digits), "; trailing stays active and never loosens this floor");
    Print("OneClickGrid: WINNER CUT = ", InpWinnerCutCount > 0
          ? StringFormat("once the winning side reaches %d positions, close the losing side (positions + pendings) at market and trail the survivor with a delayed recovery SL floor",
@@ -1375,10 +1377,23 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
       layer = "armed - newest entry + spread buffer";
      }
 
-   if(basket.cleanTrailActive || basket.winnerCutDirection != 0)
+   // Clean baskets follow price from the moment they go clean. A post-cut
+   // (K) basket instead trails exactly like an ordinary mixed basket -
+   // ladder only, no price-following - until price actually reaches the
+   // fixed recovery SL level itself (RecoveryStopPrice: anchor for k=1,
+   // anchor + step for k=2, ...). Only from that point does price-following
+   // take over, carrying the line the rest of the way to the arm distance
+   // and beyond; before it, the K case must not trail any tighter than the
+   // no-cut case would.
+   bool priceFollowingActive = basket.cleanTrailActive;
+   if(basket.winnerCutDirection != 0)
      {
-      // Price-following protection is active for clean and post-cut baskets,
-      // including the approach to the delayed recovery SL milestone.
+      double recoveryStop = RecoveryStopPrice(basket);
+      priceFollowingActive = (direction == 1) ? (bid >= recoveryStop) : (ask <= recoveryStop);
+     }
+
+   if(priceFollowingActive)
+     {
       double priceCandidate = ((direction == 1) ? bid : ask) - direction * TrailArmPrice();
       if(IsBetterLine(priceCandidate, candidate, direction))
          candidate = priceCandidate;
