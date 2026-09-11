@@ -125,6 +125,7 @@ let sideCloses;
 let basketCloses;
 let applies;
 let failsafeApplies;
+let failsafeDirection;
 let statsReads;
 let pendingDeletes;
 let sideCloseSucceeds;
@@ -184,6 +185,7 @@ function reset(direction = 1) {
   basketCloses = 0;
   applies = 0;
   failsafeApplies = 0;
+  failsafeDirection = null;
   statsReads = 0;
   pendingDeletes = 0;
   sideCloseSucceeds = false;
@@ -251,7 +253,7 @@ function GetTrailingAnchors(_basket, direction) {
   };
 }
 function ApplyBasketProtection() { applies += 1; }
-function ApplyFailsafeStop() { failsafeApplies += 1; }
+function ApplyFailsafeStop(_basket, direction = 0) { failsafeApplies += 1; failsafeDirection = direction; }
 function HistoryDealSelect() { return true; }
 function HistoryDealGetString() { return deal.symbol; }
 function HistoryDealGetInteger(_ticket, property) {
@@ -337,6 +339,20 @@ for (const direction of [1, -1]) {
     assert(g_closeBaskets[0].winnerCutDirection === direction, 'winner direction was not banked');
     ManageFormulaClose();
     assert(sideCloses === 2 && applies === 0, 'retry created protection before recovery arm');
+  });
+
+  test(`failsafe stop protects the cut side while its close keeps failing direction ${direction}`, () => {
+    reset(direction);
+    ManageFormulaClose();
+    assert(sideCloses === 1 && failsafeApplies === 1 && failsafeDirection === -direction,
+      'failsafe stop did not guard the cut side after the first failed close');
+    ManageFormulaClose();
+    assert(sideCloses === 2 && failsafeApplies === 2 && failsafeDirection === -direction,
+      'failsafe stop did not keep guarding the cut side on retry');
+    sideCloseSucceeds = true;
+    ManageFormulaClose();
+    assert(sideCloses === 3 && failsafeApplies === 2,
+      'failsafe stop ran again after the cut side finally closed');
   });
 
   test(`failed winner retry still enforces budget direction ${direction}`, () => {

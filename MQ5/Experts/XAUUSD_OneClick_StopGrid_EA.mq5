@@ -1271,17 +1271,19 @@ void CloseSideAtMarket(const CloseBasket &basket, const int direction)
   }
 
 //+------------------------------------------------------------------+
-// A settled market exit (marketExitRequested) can keep failing - broker
-// FROZEN, no connection, requote rejection - while price keeps moving.
-// The basket's own protection line is behind current price by then (that
-// is what triggered the exit) and the broker would reject re-setting it
-// at the same level, so this is not a repeat of ApplyBasketProtection: it
-// hugs current price as tightly as the broker's stop/freeze distance
-// allows, purely to cap further loss while CloseBasketAtMarket keeps
-// retrying. It only ever tightens an existing stop, never loosens one,
-// and is not trailing - once the exit finally goes through there is
-// nothing left to protect.
-void ApplyFailsafeStop(const CloseBasket &basket)
+// A settled market exit (marketExitRequested) or a WINNER CUT side-close
+// can keep failing - broker FROZEN, no connection, requote rejection -
+// while price keeps moving. The basket's own protection line (or, for a
+// cut side, its usual lack of any SL at all) does not help there, so this
+// is not a repeat of ApplyBasketProtection: it hugs current price as
+// tightly as the broker's stop/freeze distance allows, purely to cap
+// further loss while the market-close keeps retrying. It only ever
+// tightens an existing stop, never loosens one, and is not trailing -
+// once the exit finally goes through there is nothing left to protect.
+// direction selects which side to touch: 0 (default) means every position
+// in the basket, for a full-basket exit; 1 or -1 restricts it to just that
+// side, for a WINNER CUT close that is only meant to remove the loser.
+void ApplyFailsafeStop(const CloseBasket &basket, const int direction = 0)
   {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1297,6 +1299,9 @@ void ApplyFailsafeStop(const CloseBasket &basket)
          continue;
 
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      if((direction == 1 && type != POSITION_TYPE_BUY) ||
+         (direction == -1 && type != POSITION_TYPE_SELL))
+         continue;
       double curSL = PositionGetDouble(POSITION_SL);
       double candidate;
       bool tighter;
@@ -1714,6 +1719,8 @@ void ManageFormulaClose()
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
          GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
                         buyLosingCount, sellLosingCount);
+         if(SideHasOpenState(g_closeBaskets[b], -winningDirection))
+            ApplyFailsafeStop(g_closeBaskets[b], -winningDirection);
         }
 
       int winnerCount = (winningDirection == 1) ? buyCount : sellCount;
@@ -1756,6 +1763,8 @@ void ManageFormulaClose()
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
          GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
                         buyLosingCount, sellLosingCount);
+         if(SideHasOpenState(g_closeBaskets[b], -winningDirection))
+            ApplyFailsafeStop(g_closeBaskets[b], -winningDirection);
         }
 
       // WINNER CUT BUDGET - once WINNER CUT has fired for this basket (k > 0
