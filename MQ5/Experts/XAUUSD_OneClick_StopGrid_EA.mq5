@@ -1271,6 +1271,62 @@ void CloseSideAtMarket(const CloseBasket &basket, const int direction)
   }
 
 //+------------------------------------------------------------------+
+// A settled market exit (marketExitRequested) can keep failing - broker
+// FROZEN, no connection, requote rejection - while price keeps moving.
+// The basket's own protection line is behind current price by then (that
+// is what triggered the exit) and the broker would reject re-setting it
+// at the same level, so this is not a repeat of ApplyBasketProtection: it
+// hugs current price as tightly as the broker's stop/freeze distance
+// allows, purely to cap further loss while CloseBasketAtMarket keeps
+// retrying. It only ever tightens an existing stop, never loosens one,
+// and is not trailing - once the exit finally goes through there is
+// nothing left to protect.
+void ApplyFailsafeStop(const CloseBasket &basket)
+  {
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+   double stopsDistance = MathMax(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+                                  SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL)) * _Point;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionBelongsToBasket(basket))
+         continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double curSL = PositionGetDouble(POSITION_SL);
+      double candidate;
+      bool tighter;
+
+      if(type == POSITION_TYPE_BUY)
+        {
+         candidate = NormalizePriceForDirection(bid - stopsDistance - g_tickSize, -1);
+         tighter = (curSL <= 0.0) || (candidate > curSL);
+         if(!tighter || bid - candidate <= stopsDistance)
+            continue;
+        }
+      else
+        {
+         candidate = NormalizePriceForDirection(ask + stopsDistance + g_tickSize, 1);
+         tighter = (curSL <= 0.0) || (candidate < curSL);
+         if(!tighter || candidate - ask <= stopsDistance)
+            continue;
+        }
+
+      bool sent = trade.PositionModify(ticket, candidate, PositionGetDouble(POSITION_TP));
+      uint retcode = trade.ResultRetcode();
+      if(!sent || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_DONE_PARTIAL))
+         Print("OneClickGrid: failsafe stop refresh failed #", ticket, " | ", trade.ResultRetcodeDescription());
+      else
+         Print("OneClickGrid: failsafe stop refreshed #", ticket, " -> ", DoubleToString(candidate, _Digits),
+               " while the market exit keeps retrying");
+     }
+  }
+
+//+------------------------------------------------------------------+
 void ApplyBasketProtection(const CloseBasket &basket)
   {
    // Pending retirement is handled by the clean-trend or market-exit path.
@@ -1496,6 +1552,8 @@ void ManageFormulaClose()
             ArrayRemove(g_closeBaskets, b, 1);
             SavePersistentState();
            }
+         else
+            ApplyFailsafeStop(g_closeBaskets[b]);
          continue;
         }
 

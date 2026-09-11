@@ -110,13 +110,15 @@ Loser cut counts **all open positions** on a side and measures the adverse dista
 
 Buy-direction protection triggers when Bid is at or below the line; Sell-direction protection triggers when Ask is at or above it. The EA persists the full-exit latch, attempts pending deletion, and closes remaining positions at market. SL on the winning direction and TP on the opposite direction are also installed at the common line where broker constraints permit.
 
+A settled full exit can keep failing - broker FROZEN, disconnect, requote rejection - while price keeps moving, and by then the recorded protection line is already behind current price (that is what triggered the exit) so the broker would reject re-installing it at that same level. Whenever the market close leaves positions open, a failsafe stop refreshes each one to the tightest level the broker's stop/freeze distance currently allows, moving only tighter than any existing stop and never back. It is not trailing and does not replace the retry itself; it exists purely to bound further loss while the exit keeps being retried.
+
 A broker SL/TP exit at the formula line is handled in OnTradeTransaction even if price has bounced before the next tick. Ownership uses the manual position identifier or the tagged original opening order. The exit reason, original position direction, and historical DEAL_SL/DEAL_TP must match the current formula line or the retained pre-recovery line with its original direction. The first post-cut trailing change retains that older line before replacing it, and the later milestone does not overwrite it. It can be restored even before the milestone has armed. The retained line covers a delayed modification or a direction change that leaves the older broker SL/TP installed. Unrelated optional stops at other levels do not trigger this callback path.
 
 ## Failure handling, restart, and limits
 
 | Case | Behavior |
 | --- | --- |
-| Failed close or pending deletion during full exit | Retry while the basket still has state; price rebound does not cancel the decision |
+| Failed close or pending deletion during full exit | Retry while the basket still has state; price rebound does not cancel the decision; a failsafe stop refreshes any positions still open toward current price on every retry |
 | Failed losing-side close | Retry the saved cut side while continuing budget/protection |
 | Failed SL modification | Keep the intended line and retry; an armed state does not prove the broker accepted every modification |
 | No positions left | Delete leftover pending orders; prune the basket when fully empty |

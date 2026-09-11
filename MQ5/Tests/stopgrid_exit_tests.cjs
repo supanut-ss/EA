@@ -124,6 +124,7 @@ let saves;
 let sideCloses;
 let basketCloses;
 let applies;
+let failsafeApplies;
 let statsReads;
 let pendingDeletes;
 let sideCloseSucceeds;
@@ -182,6 +183,7 @@ function reset(direction = 1) {
   sideCloses = 0;
   basketCloses = 0;
   applies = 0;
+  failsafeApplies = 0;
   statsReads = 0;
   pendingDeletes = 0;
   sideCloseSucceeds = false;
@@ -249,6 +251,7 @@ function GetTrailingAnchors(_basket, direction) {
   };
 }
 function ApplyBasketProtection() { applies += 1; }
+function ApplyFailsafeStop() { failsafeApplies += 1; }
 function HistoryDealSelect() { return true; }
 function HistoryDealGetString() { return deal.symbol; }
 function HistoryDealGetInteger(_ticket, property) {
@@ -309,6 +312,22 @@ for (const direction of [1, -1]) {
     basket.protectionDirection = direction;
     basket.protectionPrice = 4005;
     assert(!ProtectionLineTouched(basket, 0, 4005), 'invalid quote triggered line');
+  });
+
+  test(`failsafe stop runs only while a settled exit keeps failing direction ${direction}`, () => {
+    reset(direction);
+    const basket = g_closeBaskets[0];
+    basket.marketExitRequested = true;
+    ManageFormulaClose();
+    assert(basketCloses === 1 && failsafeApplies === 1,
+      'failsafe stop did not run while the settled exit kept failing');
+    ManageFormulaClose();
+    assert(basketCloses === 2 && failsafeApplies === 2,
+      'failsafe stop did not keep running on repeated retries');
+    basketCloseSucceeds = true;
+    ManageFormulaClose();
+    assert(g_closeBaskets.length === 0 && failsafeApplies === 2,
+      'failsafe stop ran again after the exit finally succeeded');
   });
 
   test(`failed winner cut suppresses ordinary trailing direction ${direction}`, () => {
