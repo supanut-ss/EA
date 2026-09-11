@@ -1,119 +1,136 @@
-# XAUUSD One-Click Stop Grid EA
+# XAUUSD One-Click Stop Grid EA v1.36
 
-## Deterministic behavior
+## Scope and defaults
 
-- Attach `XAUUSD_OneClick_StopGrid_EA.mq5` to the intended gold-symbol chart on an MT5 hedging account.
-- A newly filled manual market order (`Magic = 0`) on that chart symbol is the trigger and level 1 of its direction.
-- With `InpOrdersPerSide = 5` (default), a manual buy creates four Buy Stops above the manual fill and five Sell Stops below it. A manual sell creates four Sell Stops below and five Buy Stops above.
-- `InpPriceStepCents` uses price cents rather than broker points. Its default `300` is a direct `3.000` price distance and creates levels such as 4000, 4003, and 4006 regardless of quote digits. The step is deliberately wide relative to the exit distances below: at gold near 4000 a `2.000` step is only 0.05% of price, which is noise rather than direction, and a grid that tight is consumed by ordinary intraday swings instead of by a real trend.
-- Opening lots: level 1 on each side (the manual entry, and the opposite side's first pending order) always uses the manual entry's own lot — open it at whatever size you want, and the opposite side's first Stop matches it exactly. Level 2 and beyond use a fixed lot progression that is independent of the manual lot: odd multiples of `InpFixedLotUnit` (default `0.01`) — `3, 5, 7, 9, 11, 13, 15, 17, ...` i.e. `0.03, 0.05, 0.07, 0.09, 0.11, 0.13, 0.15, 0.17 lot`. Both sides follow the same fixed progression from level 2 onward.
-### Basket exit rules
+Each newly filled manual entry (Magic 0) on the chart symbol starts an independent basket. Use a hedging account and one EA instance per account/server/symbol/magic scope.
 
-Exit distances use the same price-cent unit as the grid: `300` means a `3.000` price move, `200` means `2.000`. Every rule below measures against the **newest position on the relevant side**, not against the basket as a whole.
-
-**Invariant — a loss-side exit distance must stay below `InpPriceStepCents`.** The loser cut fires at `2.000` while the next adverse level only fills at `3.000`: if a loss-side distance ever reached the step, the grid would open another position while the EA was still waiting to act, and the basket would grow faster than it could be closed.
-
-The trailing arm is the one distance allowed to equal the step, and `OnInit` only rejects `InpTrailArmCents > InpPriceStepCents`. At exactly one step (`300`, the default) the armed stage deliberately stops firing mid-grid — the next level always fills before price can travel that far, which moves the anchor out from under it — so the line stays a full step behind the market instead of jumping up under the newest entry. That is the point: a line parked `1.950` under the market is taken out by ordinary gold noise long before the trend is done.
-
-### Trailing protection (base + armed stage)
-
-The basket carries **one** protective price line, applied to every position at once: an SL on positions in the winning direction and a TP at the same price on opposite-direction positions, because MT5 cannot place an SL on the far side of the market. When price touches the line the whole basket closes together.
-
-**Neither stage runs until the winning side holds two positions.** A lone manual entry is not a grid yet: trailing it would park the line behind that entry and close the basket for a token profit before level 2 could fill at `3.000`, so the grid would never develop. The manual position therefore carries no trailing line of its own — the first line appears when the second position on its side fills.
-
-Two stages then compete to set that line, and the better of the two wins:
-
-- **Base — the previous position's entry + `InpProtectSpreadBuffer` (`0.050`).** Available the moment that second position exists, with no price movement required, so an established grid is never left unprotected. It costs the newest position one grid step (minus the small spread cushion), which the older positions' gains cover.
-- **Armed — the newest entry + `InpProtectSpreadBuffer`, once price has run `InpTrailArmCents` (`3.000`) past that newest entry.** Note this locks only the small spread cushion past the newest entry, not the whole arm distance — the arm distance is just the trigger for ratcheting the line forward, not the profit it locks in. At the default arm of one full grid step this stage is dormant for every level except the last, since the next pending fills first and moves the anchor. It therefore only bites once the grid is fully extended and nothing is left to fill.
-
-Two properties make this work:
-
-- **The line only moves away from the market, never back toward it.** Protection once gained is never given up.
-- **Pending orders are left alive** (on the side still gridding). The grid keeps extending while the basket is protected, so a long trend keeps adding levels instead of being cut short. Only a market exit (loser cut, safety breaker, or the winner cut budget backstop below) deletes pendings — plus a cleanup whenever a basket is left holding no positions at all, whether the line took them out or the user closed them by hand, so live stop orders can never silently re-enter a basket that is already finished.
-
-**Winner cut — bank the edge (`k > 0` only).** Once the winning side reaches `InpWinnerCutCount = 3` positions, the losing side — its open positions and its remaining pending orders — closes at market immediately, no ratio check and no extra price-move requirement. The number of losing positions closed at that moment is banked as `k` for this basket, along with the winning side's newest entry price at that instant (the "cut anchor"). The winning side is left running with no hedge left on the other side; the trailing line above takes over protecting it from there. A **clean `k = 0` basket never triggers this** and is left entirely to the trailing line so a genuine trend is not cut short. Set `InpWinnerCutCount = 0` to disable.
-
-**Winner cut budget — the backstop after the cut (`k > 0` only).** Since the loser side is gone for good once the winner cut fires, the surviving side has no hedge left if price reverses hard. As compensation for the loss it already banked, the surviving side is allowed to extend `k` grid steps past its cut-anchor price; once price reaches that limit — in either direction, whether still trending or now retracing — the whole remaining side is closed at market. This is what stops a hard pullback right after the cut from turning the banked edge into a loss: the ladder above still trails as price advances, but if it reverses far enough to hit the budget limit before the trailing line has caught up, the budget forces the exit. A `k = 0` basket (no winner cut yet) has no such ceiling.
-
-**Loser cut — hard loss stop.** Evaluated before every other rule. Once one side holds `InpMaxLosersBeforeCut = 2` **positions** — open positions on that side, whatever their P/L — **and** price has run `InpLoserCutMoveCents = 250` (`2.500`) against the entry of the **newest** of them, the whole basket is closed at market: winners and losers alike, no gate check, no net-P/L check. Both sides are tested separately, since a developed basket holds positions on each and stopping at the first side over the count would leave the other unexamined. Set `InpMaxLosersBeforeCut = 0` to disable.
-
-**Why the count ignores P/L.** A position only counts as losing while its own P/L is negative, and grid levels sit `3.000` apart, so a side's second position cannot be underwater until price is already a full step against the newer one. Counting losers would therefore pin the real trigger at `3.000` and make any distance below `300` dead configuration. Counting open positions instead puts the distance in charge: with two positions on a side, the cut fires exactly `2.500` past the newer one — with two Buys at 4000 and 4003 that is Bid `4000.500`, while the 4000 Buy is still in profit. The distance must stay under one grid step so the exit always lands **before the basket's next level can fill**: at Bid `4000.500` the opposite side's first Sell Stop at 3997 is still `3.500` away.
-
-**This makes the loser cut the binding stop, ahead of the trailing line.** The rule applies to whichever side price is moving against, including one that was winning a moment ago. At two positions it fires at Bid `4000.500` against a line at `4000.050`; at three it fires at `4003.500` against a line at `4003.050`. The line therefore sits `0.450` behind the cut at every level and will rarely be the exit that triggers. Two consequences follow: effective room behind the market is `2.500` rather than the line's `2.950`, and the exit is an EA-side market close instead of a broker-side stop — so it needs the terminal running, where the trailing SL would have protected the basket on its own.
-
-**Safety breaker — recovery unreachable.** A basket trades its way out when the winning side reaches `2k + 1` positions, but that count can never exceed `InpOrdersPerSide`. Once `k` grows past `(InpOrdersPerSide - 1) / 2` the recovery is arithmetically out of reach: with `InpOrdersPerSide = 5`, that is `k >= 3` (needs 7 winners, but at most 5 can ever exist). Rather than hold an unrecoverable basket, the EA closes it at market the instant `2k + 1 > InpOrdersPerSide`. This only runs while `InpUseRecoveryFormula = true`. With the loser cut now firing at `k = 2`, a third loser can no longer accumulate, so this rule is unreachable in practice and only matters if the loser cut is disabled.
-
-**The loser cut now pre-empts the winner cut in whipsaw baskets.** The winner cut needs three winners on one side while the other side still holds losers, but that other side reaching two positions puts it one `2.500` move away from closing the basket outright. In practice the winner cut therefore mostly fires against a **single** loser, so the banked `k` is usually `1` and the budget one grid step past the cut anchor. That is the deliberate trade: a two-sided basket that has already gone wrong is cut rather than nursed.
-
-Behaviour common to the full-basket market exits (loser cut, safety breaker, winner cut budget):
-
-- All delete the basket's remaining tagged pending orders first, then close each position, so a fill cannot re-enter the basket mid-exit.
-- Failed modifications and failed closes are retried on following ticks until the basket is empty.
-- The trailing line, the market-exit latch, and the winner cut's banked `k` + cut-anchor price + cut direction persist through restart (state version 5). A restored latch closes its basket on the next tick; a restored line keeps trailing from where it was; a restored `k`/anchor/direction keeps the budget ceiling in force. The three cut fields are written together or not at all — a restored set missing any of them is discarded, and the surviving side then runs without its budget ceiling.
-
-The winner cut itself is different: it closes only the losing side, not the whole basket. It banks `k`, the cut anchor and the surviving side's direction **before** sending any close, so the decision survives a mid-exit restart. From then on that stored direction — not a live P/L or position-count read — is what identifies the surviving side, and the cut side is re-closed on every following tick until it holds no positions or pendings at all. Without that stored direction, a single failed close would leave a position on the cut side and make the EA mistake it for the survivor: the budget would be measured in the wrong direction, the leftover would never be retried, and the trailing line would follow the wrong side.
-
-## Safety and limitations
-
-### Exit safety and persistence
-
-- The loser cut is the EA's only loss-triggered exit and it is measured in price distance, not money: it bounds how far the losing side may run, not the account's currency drawdown. There is still no equity-percentage ceiling and no daily-loss protection, and every rule is **per basket** — opening several manual entries creates several independent baskets whose risk adds up. `InpStopLossDistance` remains the only optional per-position loss exit, and its default `0.0` disables that SL.
-- The five basket exit rules (trailing protection, winner cut, winner cut budget, loser cut, safety breaker) are the only portfolio-management path, and all of them live inside `ManageFormulaClose()`, so `InpUseFormulaClose = false` disables every one of them. Trailing protection modifies owned positions with a common SL/TP line and submits no market close; the loser cut, the safety breaker, and the winner cut budget close the whole basket at once; the winner cut itself closes only the losing side, leaving the winning side open under the trailing line.
-- Basket ownership, the trailing protection line, and the market-exit latch persist through restart. Version 1.33 ignores and removes legacy percentage, fixed-loss, daily-loss, and liquidation fields, so attaching it cannot resume an old risk-triggered closure.
-- Use one EA instance per account/server/symbol/magic scope. Persistence uses terminal Global Variables; copying the EA to another terminal or deleting these variables does not transfer or preserve saved basket state.
-- With `InpUseFormulaClose = false` and no per-order SL, open positions have no EA-managed automatic loss exit. Increasing grid lots can therefore create unbounded losses; evaluate only in an isolated demo/test environment until independently validated.
-
-- The EA refuses to initialize on a netting account because independent grid positions require hedging mode.
-- Prices and volumes are normalized to the symbol tick size and broker volume step. A level is skipped rather than moved if its intended stop price is already behind the market or violates the broker stop distance.
-- `InpStopLossDistance` and `InpTakeProfitDistance` default to zero, meaning no SL or TP. Configure both before live evaluation if bounded per-order risk is required.
-- `InpMaxSpreadPrice` defaults to `0.20` **in price units, not points** (the check is a raw `ask - bid`). A manual entry filled while the spread is wider gets **no grid at all** — the manual position stays open on its own, unhedged and with no pending levels behind it. That is deliberate, since a grid laid out on a news-blown spread prices every level badly, but `0.20` is tight for XAUUSD: raw/ECN accounts typically sit at `0.10`-`0.20` while standard accounts often run `0.20`-`0.40`, where this default would reject nearly every grid. Confirm the live spread before trusting it, and note that a lone manual position has no trailing line (that needs a second position on its side) and no loser cut (that needs `k >= 3`), so nothing closes it automatically.
-- Pending orders are not automatically cancelled merely because the opposite side triggers. They remain until filled, deleted by either basket exit rule or manually, or expired by `InpExpirationHours`.
-- The in-memory duplicate guard prevents repeated processing during one EA run. Existing manual positions are deliberately not multiplied after restart or reattachment.
-- Basket tags and persisted adopted-root records allow management to be reconstructed after restart, including a tracked basket whose only remaining position is its manual root.
-- Increasing opening lots are high risk. Verify the maximum generated lot and margin requirement before enabling AutoTrading, then forward-test on a demo account.
-
-## Example
-
-For a manual Buy at 4000 with 0.02 lot, five levels per side, `InpPriceStepCents = 300`, and `InpFixedLotUnit = 0.01`:
-
-| Side | Prices | Lots |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| Buy | 4000 manual, then Buy Stops at 4003, 4006, 4009, 4012 | 0.02, 0.03, 0.05, 0.07, 0.09 |
-| Sell | Sell Stops at 3997, 3994, 3991, 3988, 3985 | 0.02, 0.03, 0.05, 0.07, 0.09 |
+| Levels per side | 5 | The manual position counts as level 1 on its side |
+| Grid step | 300 price cents = 3.000 | Independent of broker point size |
+| Lots | Manual lot, 0.03, 0.05, 0.07, 0.09 | Level 1 on each side mirrors the manual lot; later levels use odd multiples of 0.01 |
+| Price-following trailing distance | 300 price cents = 3.000 | Distance behind executable Bid/Ask for clean and post-cut baskets |
+| Base-line cushion | 0.050 | Used by the initial/pre-cut ladder, not by the fixed recovery SL |
+| Recovery SL milestone distance | 200 price cents = 2.000 | Measured from the intended recovery SL level; trailing is already active before this milestone |
+| Winner cut count | 3 | Winning-side open positions needed while opposite losing positions exist |
+| Pre-SL loser cut | 2 positions and 2.500 adverse | Superseded for the managed side once clean trailing or the fixed recovery SL is active |
+| Maximum opening spread | 0.20 | Reject grid creation above this spread |
+| Pending cap | 100 | Per symbol/magic; reject a new grid if its full pending count does not fit |
+| Optional per-pending SL/TP | 0.0 / 0.0 | Disabled by default; does not install an initial stop on the manual root position |
+| Formula master switch | true | Enables EA-side basket exits and retries |
+| Recovery safety breaker | true | Exit when a side's losing count cannot satisfy 2k+1 within the level cap |
 
-The manual lot (`0.02` here) sets only level 1 on both sides; levels 2-5 are the same fixed `0.03, 0.05, 0.07, 0.09` regardless of what the manual lot was.
+## Opening example
 
-If every level on both sides fills, the basket carries roughly `0.52` lot in total. On a standard 100-ounce XAUUSD contract that is about `$52` of P/L per `1.000` of price movement, so verify margin against the account size before enabling AutoTrading.
+Manual Buy at 4000, 0.02 lot:
 
-### How the line trails a rising Buy grid
-
-(`InpPriceStepCents = 300`, `InpTrailArmCents = 300`, `InpProtectSpreadBuffer = 0.050`)
-
-| Event | Line sits at | Room below Bid | Set by |
+| Level | Buy price | Sell price | Lot per position |
 | --- | --- | --- | --- |
-| Only the manual position is open | no line yet | — | trailing needs two positions on the side |
-| Level 2 fills at 4003 | 4000.050 | 2.950 | base (`4000 + 0.050`) |
-| Bid drifts to 4005.900 | 4000.050 | 5.850 | unchanged; the armed stage would need Bid past 4006, where level 3 fills first |
-| Level 3 fills at 4006 | 4003.050 | 2.950 | base (`4003 + 0.050`) |
-| Level 4 fills at 4009 | 4006.050 | 2.950 | base (`4006 + 0.050`) |
-| Level 5 fills at 4012 | 4009.050 | 2.950 | base (`4009 + 0.050`) |
-| Bid passes 4015.000 (`4012 + 3.000`) | 4012.050 | 2.950 | armed — only reachable now that no pending is left to fill |
-| Bid falls back to the line | basket closes | — | every position exits together |
+| 1 | 4000 manual entry | 3997 Sell Stop | 0.02 |
+| 2 | 4003 Buy Stop | 3994 Sell Stop | 0.03 |
+| 3 | 4006 Buy Stop | 3991 Sell Stop | 0.05 |
+| 4 | 4009 Buy Stop | 3988 Sell Stop | 0.07 |
+| 5 | 4012 Buy Stop | 3985 Sell Stop | 0.09 |
 
-The line therefore never sits closer than one grid step minus the cushion (`2.950`) and widens to nearly two steps (`5.950`) just before the next level fills. With `InpTrailArmCents = 200` the armed stage would instead have pulled the line up to `2.000` under the market at every level.
+A manual Sell mirrors the layout. Grid placement is not transactional: a rejected individual request can leave a partial grid, and rejected levels are not automatically recreated. A spread/cap rejection leaves the manual position open. Pending expiration is GTC by default.
 
-### Exit examples
+## Mode 1: clean winning streak
 
-| Basket state | Rule | Action |
+A clean basket has no opposite-side positions and has not undergone winner cut. Once the profitable side has at least two positions and its initial trailing line is established:
+
+1. Persist the clean-trend decision and protection direction.
+2. Delete **all pending orders belonging to this basket**, on both sides.
+3. Retry failed deletions on later ticks without suspending protection.
+4. Keep the selected direction authoritative even if its profit later turns negative.
+5. Continue price-following trailing without needing more grid fills.
+
+The initial line uses the previous position's entry plus 0.050 for Buy, or minus 0.050 for Sell. Thereafter the clean candidate follows Bid minus 3.000 for Buy, or Ask plus 3.000 for Sell, retaining whichever line is tighter. An existing tighter stop is never loosened. The legacy armed-ladder candidate may also tighten the line when applicable. No fixed budget target exists in this clean mode.
+
+| Clean Buy example | Behavior |
+| --- | --- |
+| Only Buy at 4000 | No trailing yet |
+| Second Buy fills at 4003; Buy side is profitable | Initial line 4000.050; latch clean mode and delete all basket pendings |
+| Bid advances to 4007 | Price-following candidate 4004.000; raise SL if it improves the existing line |
+| Bid advances to 4008 | Candidate 4005.000; continue trailing |
+| Bid returns to the active line | Latch a full-basket market exit and retry until empty |
+
+The previous 2.500 loser-cut rule is skipped for the clean direction once this mode is active, allowing the requested trailing SL to control its pullback exit. Other safety checks remain. A failed cancellation can still fill an order; the latch continues pending retirement and the basket retains protection. It does not silently resume grid expansion.
+
+## Mode 2: winner cut, approach trailing, and recovery SL milestone
+
+Before winner cut, the winning direction is selected by positive aggregate position profit plus swap (if both sides are positive, choose the larger). The count on the winning side is its open-position count, not the number of individually profitable positions.
+
+Winner cut starts when that side has at least three positions and the opposite side has at least one losing position, unless a higher-priority exit has already triggered. It records:
+
+- k: the opposite-side losing-position count at cut time;
+- anchor: the newest winning-side position's entry at cut time;
+- direction: the surviving side.
+
+It persists the decision before attempting to close every position and pending order on the opposite side. The surviving side's pending orders remain until another exit deletes them. Failed side closes are retried; budget and protection continue in the same tick.
+
+### Exact recovery levels
+
+| Quantity | Buy survivor | Sell survivor |
 | --- | --- | --- |
-| 2 Buy positions, newest opened 4003, Bid 4005.9 | trailing | Line held at 4000.050 (base); the armed stage would need Bid past 4006, where level 3 fills first |
-| 3 Buy positions, newest opened 4006, Bid 4008.1 | trailing | Line at 4003.050 (base), `5.050` of room; pendings stay alive |
-| Line at 4003.050, Bid drops through it | trailing | All positions close at 4003.050, then leftover pendings are deleted |
-| 3 winners, 0 losers, newest opened 4006, Bid 4008.1 | trailing | No winner cut at `k = 0`; line simply sits at 4003.050 and the grid runs on |
-| 3 winners, 1 loser, any price | winner cut | `3 >= InpWinnerCutCount`; close the losing side's position and pendings now, bank `k = 1` and the cut-anchor = 4006 (winner's newest entry), winner keeps running |
-| 2 winners, 1 loser, any price | trailing (no winner cut yet) | Wait; winner side has not reached `InpWinnerCutCount = 3` yet |
-| 3 winners, 2 losers, any price | loser cut (not winner cut) | The loser cut is evaluated first and `k = 2` is already met, so the whole basket closes rather than the losing side being banked |
-| After winner cut with `k = 1`, anchor 4006, Bid reaches 4009 (`4006 + 1 x 3.000`) | winner cut budget | Budget exhausted; close the whole remaining side at market even though price is still advancing |
-| Buys at 4000 and 4003, Bid 4000.6 | none yet | The side holds 2 positions, but the newest (4003) is only `2.400` against — short of `2.500` |
-| Buys at 4000 and 4003, Bid 4000.5 | loser cut | Newest entry 4003 is now `2.500` against; delete pendings and close the whole basket at market. The 4000 Buy is still in profit here and closes with it |
-| Sells at 3997 and 3994, Ask 3996.5 | loser cut | The mirror case on the Sell side, `2.500` past the newest Sell |
+| Full-basket budget target | anchor + k * grid step | anchor - k * grid step |
+| Intended fixed SL | anchor + (k-1) * grid step | anchor - (k-1) * grid step |
+| SL arming quote | Bid >= fixed SL + 2.000 | Ask <= fixed SL - 2.000 |
+
+The arming comparison is inclusive. No 0.050 cushion is added to the recovery SL milestone. Version 1.36 also runs price-following trailing immediately after winner cut, before checking that milestone on every tick: Buy follows Bid minus 3.000; Sell follows Ask plus 3.000. The existing ladder candidate and any tighter protection are retained. Trailing remains active even with just one surviving position, and it continues after the milestone without moving the SL backward. The milestone is therefore a minimum protection level in the profitable direction, not an instruction to replace a tighter line. It does not postpone all SL protection until the 2.000 move.
+
+For example, with Buy anchor 4006 and unchanged Buy entries 4000/4003/4006, Bid 4007 gives a trailing candidate of 4004. For k=1, Bid 4008 raises the line to at least 4006 via the milestone, and the budget still exits at 4009. For k=2, Bid 4008 instead trails to 4005; Bid 4010 trails to at least 4007; Bid 4011 raises protection to at least 4009, with the budget still at 4012. New fills can produce a tighter ladder candidate. Only clean mode retires all pending orders; K-mode trailing does not delete surviving-side pending orders.
+
+With anchor 4006 and grid step 3.000:
+
+| Survivor | k | Budget target | Intended SL | First quote that arms SL |
+| --- | --- | --- | --- | --- |
+| Buy | 1 | Bid 4009 | 4006 | Bid 4008 |
+| Buy | 2 | Bid 4012 | 4009 | Bid 4011 |
+| Sell | 1 | Ask 4003 | 4006 | Ask 4004 |
+| Sell | 2 | Ask 4000 | 4003 | Ask 4001 |
+
+Later fills do not move the saved cut anchor, milestone, or budget target, though they may tighten the actual trailing line. Budget is checked before trailing and the milestone, so a quote that jumps directly past the target starts a full exit immediately.
+
+Before the recovery SL is armed, the existing loser cut remains active. After arming, loser cut is skipped only for the surviving direction; the cut side is still checked if a failed close left positions behind. This prevents new survivor fills from moving the old loser-cut anchor ahead of the requested fixed SL. Other existing stops and safety exits can still close earlier; the target is not a guaranteed fill or a promise of net profit after banked losses and costs.
+
+## Shared exits and priority
+
+With the formula master enabled, the per-tick order is:
+
+1. Detect a touched existing protective line; honor/retry a settled full-basket exit even after a price rebound.
+2. Retry clean pending retirement; if no positions remain, delete leftover pendings.
+3. Evaluate pre-SL loser cut independently per side, except the side already governed by clean trailing or an armed recovery SL.
+4. Evaluate the recovery safety breaker: 2 * losing count + 1 > levels per side.
+5. Retry/start winner cut (a latched clean basket does not switch to winner cut).
+6. Check the saved winner-cut budget target.
+7. Update the applicable protection: approach trailing followed by the recovery SL milestone after cut, otherwise ladder/clean trailing.
+8. Check the new line against the latest quote, then submit SL/TP modifications.
+
+Loser cut counts **all open positions** on a side and measures the adverse distance from its newest position. Two positions alone do not trigger it. With the default five levels, the safety breaker triggers at three losing positions on a side, when enabled.
+
+Buy-direction protection triggers when Bid is at or below the line; Sell-direction protection triggers when Ask is at or above it. The EA persists the full-exit latch, attempts pending deletion, and closes remaining positions at market. SL on the winning direction and TP on the opposite direction are also installed at the common line where broker constraints permit.
+
+A broker SL/TP exit at the formula line is handled in OnTradeTransaction even if price has bounced before the next tick. Ownership uses the manual position identifier or the tagged original opening order. The exit reason, original position direction, and historical DEAL_SL/DEAL_TP must match the current formula line or the retained pre-recovery line with its original direction. The first post-cut trailing change retains that older line before replacing it, and the later milestone does not overwrite it. It can be restored even before the milestone has armed. The retained line covers a delayed modification or a direction change that leaves the older broker SL/TP installed. Unrelated optional stops at other levels do not trigger this callback path.
+
+## Failure handling, restart, and limits
+
+| Case | Behavior |
+| --- | --- |
+| Failed close or pending deletion during full exit | Retry while the basket still has state; price rebound does not cancel the decision |
+| Failed losing-side close | Retry the saved cut side while continuing budget/protection |
+| Failed SL modification | Keep the intended line and retry; an armed state does not prove the broker accepted every modification |
+| No positions left | Delete leftover pending orders; prune the basket when fully empty |
+| Restart with complete saved state | Restore the basket, line, market-exit latch, cut data, clean-retirement flag, and recovery-SL flag |
+| Older saved state (versions 1-5) | Read supported legacy ownership/protection/cut fields; new flags default to false |
+| Incomplete cut state | Cannot restore that budget; terminal discovery does not reconstruct the historical cut decision |
+| Formula master false | EA-side decisions/retries stop; already-installed broker SL/TP remain; grid entry handling is separate |
+| Terminal offline | EA-side trailing, cancellation and market exits do not run; accepted broker stops remain |
+| Manual partial close | Remaining positions are still managed; no automatic full exit solely for a manual partial close |
+
+State version 6 stores clean retirement as field C, recovery SL arming as field J, and the retained pre-recovery line/direction as fields Y/Z. Every actual line change and mode decision is persisted; unchanged trailing candidates do not flush state repeatedly. Persistence uses terminal Global Variables and does not transfer to another terminal automatically.
+
+No equity-percentage or daily-loss limit exists. Stops and targets are price thresholds, not guaranteed fill prices or monetary profit guarantees. Multiple baskets add exposure. Use demo validation for actual execution behavior.
+
+## Verification
+
+Run the deterministic mocked-broker regression checks in MQ5/Tests/stopgrid_exit_tests.cjs and compile the EA with MetaEditor. The harness executes adapted production function bodies but is not a broker integration test, restart durability test, or performance backtest.

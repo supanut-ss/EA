@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid"
-#property version   "1.33"
+#property version   "1.36"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -27,7 +27,8 @@ input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distan
 input group "=== Basket Exit Rules ==="
 input bool     InpUseFormulaClose       = true;    // Master switch for every basket exit rule
 input bool     InpUseRecoveryFormula    = true;    // SAFETY BREAKER gate: winning side count >= 2 * losing count + 1
-input int      InpTrailArmCents         = 300;     // TRAILING arm distance past the newest entry in price cents; 300 = 3.000. At one full grid step the armed stage cannot tighten mid-grid, since the next level fills first and moves the anchor
+input int      InpTrailArmCents         = 300;     // Clean trailing distance and pre-cut ladder arm distance in price cents; 300 = 3.000
+input int      InpRecoverySLArmCents    = 200;     // Arm the fixed recovery SL after price passes that SL by 2.000
 input double   InpProtectSpreadBuffer   = 0.050;   // Fixed cushion added to every trailing SL step, in price units
 input int      InpWinnerCutCount        = 3;       // WINNER CUT: 0 = disabled; otherwise close the losing side (positions + pendings) once the winning side reaches this many positions
 input int      InpMaxLosersBeforeCut    = 2;       // LOSER CUT: 0 = disabled; otherwise close everything once one side holds this many POSITIONS (P/L ignored) and the newest is passed by the distance below
@@ -60,6 +61,10 @@ struct CloseBasket
    int    bankedLoserCount;     // k: losing-side positions WINNER CUT closed at cut time (0 = never cut)
    double winnerCutAnchorPrice; // the winning side's newest entry price at the moment WINNER CUT fired
    int    winnerCutDirection;   // the surviving side's direction once WINNER CUT fired (0 = never cut)
+   bool   cleanTrailActive;    // clean trend: retire all pending orders and trail price
+   bool   recoverySLArmed;     // fixed post-cut SL has reached its arming threshold
+   double retainedProtectionPrice; // pre-recovery broker line may still execute
+   int    retainedProtectionDirection;
   };
 CloseBasket g_closeBaskets[];
 
@@ -71,7 +76,8 @@ int OnInit()
       InpMaxOwnPendingOrders < 1 ||
       InpStopLossDistance < 0.0 || InpTakeProfitDistance < 0.0 ||
       InpMaxSpreadPrice < 0.0 ||
-      InpTrailArmCents <= 0 ||
+      InpTrailArmCents <= 0 || InpRecoverySLArmCents <= 0 ||
+      InpRecoverySLArmCents >= InpPriceStepCents ||
       InpProtectSpreadBuffer < 0.0 ||
       InpWinnerCutCount < 0 ||
       InpMaxLosersBeforeCut < 0 ||
@@ -137,9 +143,11 @@ int OnInit()
          DoubleToString(TrailArmPrice(), _Digits),
          " past the newest entry, move the line to that entry + ",
          DoubleToString(InpProtectSpreadBuffer, _Digits),
-         "; the line never moves back and pending orders stay alive");
+         "; clean baskets retire all pending orders and then trail price by this distance");
+   Print("OneClickGrid: recovery SL = cut anchor + direction * (k-1) grid steps; arm after price passes SL by ",
+         DoubleToString(InpRecoverySLArmCents / 100.0, _Digits), "; trailing stays active and never loosens this floor");
    Print("OneClickGrid: WINNER CUT = ", InpWinnerCutCount > 0
-         ? StringFormat("once the winning side reaches %d positions, close the losing side (positions + pendings) at market and leave the winner to the trailing line",
+         ? StringFormat("once the winning side reaches %d positions, close the losing side (positions + pendings) at market and trail the survivor with a delayed recovery SL floor",
                         InpWinnerCutCount)
          : "disabled");
    Print("OneClickGrid: WINNER CUT BUDGET = after the cut, the surviving side may extend ",
@@ -165,6 +173,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0)
       return;
 
+   ProcessProtectionExitDeal(trans.deal);
    ProcessManualEntryDeal(trans.deal);
   }
 
@@ -592,6 +601,10 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].bankedLoserCount = 0;
    g_closeBaskets[size].winnerCutAnchorPrice = 0.0;
    g_closeBaskets[size].winnerCutDirection = 0;
+   g_closeBaskets[size].cleanTrailActive = false;
+   g_closeBaskets[size].recoverySLArmed = false;
+   g_closeBaskets[size].retainedProtectionPrice = 0.0;
+   g_closeBaskets[size].retainedProtectionDirection = 0;
    return(true);
   }
 
@@ -745,7 +758,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P","X","K","W","G"};
+   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P","X","K","W","G","C","J","Y","Z"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -773,12 +786,16 @@ void SavePersistentState()
       WriteStateValue(BasketStateKey(i, "K"), (double)g_closeBaskets[i].bankedLoserCount);
       WriteStateValue(BasketStateKey(i, "W"), g_closeBaskets[i].winnerCutAnchorPrice);
       WriteStateValue(BasketStateKey(i, "G"), (double)g_closeBaskets[i].winnerCutDirection);
+      WriteStateValue(BasketStateKey(i, "C"), g_closeBaskets[i].cleanTrailActive ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "J"), g_closeBaskets[i].recoverySLArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "Y"), g_closeBaskets[i].retainedProtectionPrice);
+      WriteStateValue(BasketStateKey(i, "Z"), (double)g_closeBaskets[i].retainedProtectionDirection);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
       DeleteBasketStateSlot(i);
 
    WriteStateValue(g_statePrefix + ".BC", (double)basketCount);
-   WriteStateValue(g_statePrefix + ".V", 5.0);
+   WriteStateValue(g_statePrefix + ".V", 6.0);
    GlobalVariablesFlush();
   }
 
@@ -792,7 +809,7 @@ void LoadPersistentBaskets()
       return;
 
    int stateVersion = (int)MathRound(versionValue);
-   if(stateVersion < 1 || stateVersion > 5)
+   if(stateVersion < 1 || stateVersion > 6)
       return;
 
    int count = (int)MathRound(countValue);
@@ -875,6 +892,26 @@ void LoadPersistentBaskets()
       else if(cutStateComplete && bankedValue > 0.5)
          Print("OneClickGrid: discarded incomplete WINNER CUT budget state #", root,
                "; the surviving side runs without its budget ceiling");
+
+      double cleanValue = 0.0, recoveryValue = 0.0;
+      if(index >= 0 && stateVersion >= 6 && g_closeBaskets[index].protectionArmed)
+        {
+         if(ReadStateValue(BasketStateKey(i, "C"), cleanValue) && cleanValue > 0.5 &&
+            g_closeBaskets[index].winnerCutDirection == 0)
+            g_closeBaskets[index].cleanTrailActive = true;
+         if(ReadStateValue(BasketStateKey(i, "J"), recoveryValue) && recoveryValue > 0.5 &&
+            g_closeBaskets[index].winnerCutDirection != 0)
+            g_closeBaskets[index].recoverySLArmed = true;
+         double retainedPrice = 0.0, retainedDirection = 0.0;
+         if(g_closeBaskets[index].winnerCutDirection != 0 &&
+            ReadStateValue(BasketStateKey(i, "Y"), retainedPrice) && retainedPrice > 0.0 &&
+            ReadStateValue(BasketStateKey(i, "Z"), retainedDirection) &&
+            (retainedDirection == 1.0 || retainedDirection == -1.0))
+           {
+            g_closeBaskets[index].retainedProtectionPrice = retainedPrice;
+            g_closeBaskets[index].retainedProtectionDirection = (int)retainedDirection;
+           }
+        }
      }
   }
 
@@ -1023,6 +1060,92 @@ bool IsBetterLine(const double candidate, const double current, const int direct
   }
 
 //+------------------------------------------------------------------+
+bool ProtectionLineTouched(const CloseBasket &basket, const double bid, const double ask)
+  {
+   if(!basket.protectionArmed || basket.protectionPrice <= 0.0 || bid <= 0.0 || ask <= 0.0)
+      return(false);
+   if(basket.protectionDirection == 1)
+      return(bid <= basket.protectionPrice);
+   if(basket.protectionDirection == -1)
+      return(ask >= basket.protectionPrice);
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void RequestProtectionExit(CloseBasket &basket)
+  {
+   if(!basket.marketExitRequested)
+     {
+      basket.marketExitRequested = true;
+      SavePersistentState();
+      Print("OneClickGrid: protection triggered; closing entire basket #", basket.rootOrderTicket);
+     }
+   CloseBasketAtMarket(basket);
+  }
+
+//+------------------------------------------------------------------+
+void ProcessProtectionExitDeal(const ulong dealTicket)
+  {
+   if(!InpUseFormulaClose || !HistoryDealSelect(dealTicket))
+      return;
+   if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol ||
+      (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      return;
+
+   ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(dealTicket, DEAL_REASON);
+   if(reason != DEAL_REASON_SL && reason != DEAL_REASON_TP)
+      return;
+   ENUM_DEAL_TYPE type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+   if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+      return;
+   int positionDirection = (type == DEAL_TYPE_SELL) ? 1 : -1;
+   ulong positionId = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+   double exitLevel = HistoryDealGetDouble(dealTicket, reason == DEAL_REASON_SL ? DEAL_SL : DEAL_TP);
+   if(positionId == 0 || exitLevel <= 0.0)
+      return;
+
+   // Closing comments may be replaced by [sl ...]/[tp ...]. Recover ownership
+   // from the original opening order identified by POSITION_IDENTIFIER.
+   ulong root = 0;
+   if(HistoryOrderSelect(positionId) &&
+      HistoryOrderGetString(positionId, ORDER_SYMBOL) == _Symbol &&
+      (ulong)HistoryOrderGetInteger(positionId, ORDER_MAGIC) == InpMagicNumber)
+      root = RootTicketFromComment(HistoryOrderGetString(positionId, ORDER_COMMENT));
+
+   for(int b=ArraySize(g_closeBaskets)-1; b>=0; b--)
+     {
+      if(positionId != g_closeBaskets[b].manualPositionId &&
+         (root == 0 || root != g_closeBaskets[b].rootOrderTicket))
+         continue;
+      if(!g_closeBaskets[b].protectionArmed)
+         return;
+      // Match the formula line, not a slipped execution price or an
+      // unrelated optional stop that was already tighter than the line.
+      bool currentMatch = ProtectionExitMatches(g_closeBaskets[b].protectionDirection,
+         g_closeBaskets[b].protectionPrice, positionDirection, reason, exitLevel);
+      bool retainedMatch = ProtectionExitMatches(g_closeBaskets[b].retainedProtectionDirection,
+         g_closeBaskets[b].retainedProtectionPrice, positionDirection, reason, exitLevel);
+      if(!currentMatch && !retainedMatch)
+         return;
+      RequestProtectionExit(g_closeBaskets[b]);
+      return;
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool ProtectionExitMatches(const int lineDirection, const double linePrice,
+                           const int positionDirection, const ENUM_DEAL_REASON reason,
+                           const double exitLevel)
+  {
+   if((lineDirection != 1 && lineDirection != -1) || linePrice <= 0.0)
+      return(false);
+   bool winningSide = (positionDirection == lineDirection);
+   if((winningSide && reason != DEAL_REASON_SL) || (!winningSide && reason != DEAL_REASON_TP))
+      return(false);
+   return(MathAbs(exitLevel - linePrice) <= g_tickSize / 2.0);
+  }
+
+//+------------------------------------------------------------------+
 bool GetTrailingAnchors(const CloseBasket &basket,
                         const int direction,
                         double &newestEntry,
@@ -1094,7 +1217,8 @@ void CloseBasketAtMarket(const CloseBasket &basket)
       if(ticket == 0 || !PositionBelongsToBasket(basket))
          continue;
 
-      if(!trade.PositionClose(ticket, InpSlippagePoints))
+      bool sent = trade.PositionClose(ticket, InpSlippagePoints);
+      if(!sent || trade.ResultRetcode() != TRADE_RETCODE_DONE)
          Print("OneClickGrid: market close failed #", ticket, " | ", trade.ResultRetcodeDescription(),
                " | it is retried on the following ticks");
      }
@@ -1137,7 +1261,8 @@ void CloseSideAtMarket(const CloseBasket &basket, const int direction)
       if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != posType)
          continue;
 
-      if(!trade.PositionClose(ticket, InpSlippagePoints))
+      bool sent = trade.PositionClose(ticket, InpSlippagePoints);
+      if(!sent || trade.ResultRetcode() != TRADE_RETCODE_DONE)
          Print("OneClickGrid: market close failed #", ticket, " | ", trade.ResultRetcodeDescription(),
                " | it is retried on the following ticks");
      }
@@ -1146,8 +1271,7 @@ void CloseSideAtMarket(const CloseBasket &basket, const int direction)
 //+------------------------------------------------------------------+
 void ApplyBasketProtection(const CloseBasket &basket)
   {
-   // Pending orders are deliberately left alive: the protective line trails,
-   // so the grid must stay able to extend while the basket is protected.
+   // Pending retirement is handled by the clean-trend or market-exit path.
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double stopsDistance = MathMax(SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
@@ -1216,25 +1340,8 @@ void ApplyBasketProtection(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
-//| Ladder trailing protection, re-evaluated at every tick and every  |
-//| new fill alike.                                                    |
-//|  Base   - the previous position's entry + InpProtectSpreadBuffer, |
-//|           usable the moment a second position exists on the       |
-//|           winning side. It costs the newest position one grid     |
-//|           step, but needs no price movement at all, so the basket |
-//|           is never unprotected.                                   |
-//|  Armed  - once price has actually travelled TrailArmPrice() past  |
-//|           the newest entry, the line ratchets forward to that     |
-//|           newest entry + InpProtectSpreadBuffer - a small cushion, |
-//|           not the whole arm distance, so a real trend keeps room  |
-//|           to run instead of being trailed tightly. At the default |
-//|           arm of one full grid step this stage stays dormant      |
-//|           mid-grid: the next level fills before price can travel  |
-//|           that far, which moves the anchor out from under it. It  |
-//|           therefore only bites on the last level, where no        |
-//|           further pending order is left to fill.                  |
-//| The better of the two wins, and the line only ever moves away     |
-//| from the market so protection can never be given back.            |
+//| Mixed baskets retain ladder protection until winner cut. Clean   |
+//| and post-cut baskets also trail executable price toward the exit.|
 //+------------------------------------------------------------------+
 void UpdateTrailingProtection(CloseBasket &basket, const int direction)
   {
@@ -1251,10 +1358,12 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
    // behind the manual entry and close the basket for a token profit before
    // the next level can even fill, so both stages wait until this side
    // actually holds two positions.
-   if(previousEntry <= 0.0)
+   if(previousEntry <= 0.0 && !basket.cleanTrailActive && basket.winnerCutDirection == 0)
       return;
 
-   double candidate = previousEntry + direction * InpProtectSpreadBuffer;
+   double candidate = previousEntry > 0.0
+      ? previousEntry + direction * InpProtectSpreadBuffer
+      : ((direction == 1) ? bid : ask) - direction * TrailArmPrice();
    string layer = "base - previous entry + spread buffer";
 
    double armTrigger = newestEntry + direction * TrailArmPrice();
@@ -1266,23 +1375,35 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
       layer = "armed - newest entry + spread buffer";
      }
 
+   if(basket.cleanTrailActive || basket.winnerCutDirection != 0)
+     {
+      // Price-following protection is active for clean and post-cut baskets,
+      // including the approach to the delayed recovery SL milestone.
+      double priceCandidate = ((direction == 1) ? bid : ask) - direction * TrailArmPrice();
+      if(IsBetterLine(priceCandidate, candidate, direction))
+         candidate = priceCandidate;
+      layer = "price-following trailing";
+     }
+
    double line = NormalizePriceForDirection(candidate, -direction);
 
    if(basket.protectionArmed && basket.protectionDirection == direction &&
       !IsBetterLine(line, basket.protectionPrice, direction))
       return;
 
-   bool firstArm = !basket.protectionArmed;
+   if(basket.winnerCutDirection != 0 && basket.protectionArmed &&
+      basket.retainedProtectionDirection == 0)
+     {
+      basket.retainedProtectionPrice = basket.protectionPrice;
+      basket.retainedProtectionDirection = basket.protectionDirection;
+     }
    basket.protectionArmed = true;
    basket.protectionDirection = direction;
    basket.protectionPrice = line;
 
-   // Only the initial arm is flushed to disk. Trailing writes every tick
-   // would flush constantly, and the exact line does not need to survive a
-   // restart: it is re-derived from the open positions, while the
-   // broker-side SL is ratcheted by MathMax/MathMin and cannot regress.
-   if(firstArm)
-      SavePersistentState();
+   // Persist only an actual line change (unchanged candidates returned above).
+   // Exact recovery is needed to attribute broker SL/TP exits after restart.
+   SavePersistentState();
 
    Print("OneClickGrid: trailing line #", basket.rootOrderTicket,
          " -> ", DoubleToString(line, _Digits),
@@ -1292,13 +1413,65 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
   }
 
 //+------------------------------------------------------------------+
+double RecoveryStopPrice(const CloseBasket &basket)
+  {
+   return(NormalizePriceForDirection(basket.winnerCutAnchorPrice +
+      basket.winnerCutDirection * (basket.bankedLoserCount - 1) * GridStepPrice(),
+      -basket.winnerCutDirection));
+  }
+
+//+------------------------------------------------------------------+
+void UpdateRecoveryProtection(CloseBasket &basket)
+  {
+   if(basket.winnerCutDirection == 0 || basket.bankedLoserCount < 1 || basket.winnerCutAnchorPrice <= 0.0)
+      return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return;
+   int direction = basket.winnerCutDirection;
+   double stopPrice = RecoveryStopPrice(basket);
+   double armPrice = stopPrice + direction * (InpRecoverySLArmCents / 100.0);
+   bool reached = (direction == 1) ? (bid >= armPrice) : (ask <= armPrice);
+   if(!basket.recoverySLArmed && !reached)
+      return;
+   if(basket.recoverySLArmed)
+      return; // Milestone already applied; the caller keeps trailing independently.
+
+   // Preserve any existing tighter protection rather than loosening stops.
+   // The old line can still fill before a modification succeeds, or remain
+   // installed as the other stop type after a direction change.
+   if(basket.protectionArmed && basket.retainedProtectionDirection == 0)
+     {
+      basket.retainedProtectionPrice = basket.protectionPrice;
+      basket.retainedProtectionDirection = basket.protectionDirection;
+     }
+   if(!basket.protectionArmed || basket.protectionDirection != direction ||
+      IsBetterLine(stopPrice, basket.protectionPrice, direction))
+      basket.protectionPrice = stopPrice;
+   basket.protectionDirection = direction;
+   basket.protectionArmed = true;
+   basket.recoverySLArmed = true;
+   SavePersistentState();
+   Print("OneClickGrid: recovery SL armed #", basket.rootOrderTicket,
+         " | SL=", DoubleToString(basket.protectionPrice, _Digits),
+         " | trigger=", DoubleToString(armPrice, _Digits));
+  }
+
+//+------------------------------------------------------------------+
 void ManageFormulaClose()
   {
    for(int b=ArraySize(g_closeBaskets)-1; b>=0; b--)
      {
-      // The market-exit latch is retried every tick until the basket is
-      // empty. The protective line is deliberately NOT a latch: it has to
-      // keep trailing, so it falls through to the rules below.
+      // A touched line becomes a persistent full-basket exit before any
+      // direction change, side retry, or new trailing candidate is evaluated.
+      if(ProtectionLineTouched(g_closeBaskets[b], SymbolInfoDouble(_Symbol, SYMBOL_BID),
+                               SymbolInfoDouble(_Symbol, SYMBOL_ASK)))
+        {
+         RequestProtectionExit(g_closeBaskets[b]);
+         continue;
+        }
+      // Retry a settled exit even if price has bounced away from the line.
       if(g_closeBaskets[b].marketExitRequested)
         {
          CloseBasketAtMarket(g_closeBaskets[b]);
@@ -1316,6 +1489,9 @@ void ManageFormulaClose()
       GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
                      buyLosingCount, sellLosingCount);
 
+      if(g_closeBaskets[b].cleanTrailActive)
+         DeleteBasketPendingOrders(g_closeBaskets[b]);
+
       if(buyCount + sellCount == 0)
         {
          // No positions left - the protective line took them out, or the
@@ -1331,7 +1507,10 @@ void ManageFormulaClose()
          continue;
         }
 
-      // LOSER CUT - hard loss stop, evaluated before every other rule and
+      // LOSER CUT - pre-SL loss stop, evaluated independently per side.
+      // An active clean trail or armed recovery SL supersedes this stop
+      // for its managed direction. The opposite side is still checked.
+      // Evaluated before winner-cut selection and
       // independently per side. The count is of POSITIONS open on a side,
       // regardless of their P/L, so the distance is what decides: once a
       // side holds InpMaxLosersBeforeCut positions and price has run
@@ -1351,7 +1530,14 @@ void ManageFormulaClose()
 
          for(int d=0; cutBid > 0.0 && cutAsk > 0.0 && d<2; d++)
            {
-            int cutDirection = (d == 0) ? 1 : -1;
+             int cutDirection = (d == 0) ? 1 : -1;
+             // Once its requested SL mode is active, do not let the legacy
+             // distance stop pre-empt that side's trailing/fixed SL.
+             if((g_closeBaskets[b].cleanTrailActive &&
+                 cutDirection == g_closeBaskets[b].protectionDirection) ||
+                (g_closeBaskets[b].recoverySLArmed &&
+                 cutDirection == g_closeBaskets[b].winnerCutDirection))
+                continue;
             int sideCount = (cutDirection == 1) ? buyCount : sellCount;
             if(sideCount < InpMaxLosersBeforeCut)
                continue;
@@ -1433,6 +1619,8 @@ void ManageFormulaClose()
       // cut side's closes failed and left a position behind.
       if(g_closeBaskets[b].winnerCutDirection != 0)
          winningDirection = g_closeBaskets[b].winnerCutDirection;
+      else if(g_closeBaskets[b].cleanTrailActive)
+         winningDirection = g_closeBaskets[b].protectionDirection;
 
       // With no side to manage there is nothing new to trail behind, but a
       // line already sitting on the broker keeps protecting the basket.
@@ -1451,7 +1639,8 @@ void ManageFormulaClose()
                " | the cut side still holds orders or positions; closing it again",
                " | direction=", -winningDirection);
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
-         continue;
+         GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
+                        buyLosingCount, sellLosingCount);
         }
 
       int winnerCount = (winningDirection == 1) ? buyCount : sellCount;
@@ -1465,7 +1654,8 @@ void ManageFormulaClose()
       // running with no hedge left on the other side; the trailing line
       // below takes over protecting it from here. A clean basket (k = 0)
       // has nothing to bank and is skipped.
-      if(InpWinnerCutCount > 0 && g_closeBaskets[b].winnerCutDirection == 0 &&
+      if(InpWinnerCutCount > 0 && !g_closeBaskets[b].cleanTrailActive &&
+         g_closeBaskets[b].winnerCutDirection == 0 &&
          losingCount > 0 && winnerCount >= InpWinnerCutCount)
         {
          // The anchor, k and the direction are banked together or not at
@@ -1491,7 +1681,8 @@ void ManageFormulaClose()
          g_closeBaskets[b].winnerCutDirection = winningDirection;
          SavePersistentState();
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
-         continue;
+         GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyProfit, sellProfit, netProfit,
+                        buyLosingCount, sellLosingCount);
         }
 
       // WINNER CUT BUDGET - once WINNER CUT has fired for this basket (k > 0
@@ -1522,9 +1713,46 @@ void ManageFormulaClose()
            }
         }
 
-      UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
+      // A winner cut whose side-close has not yet fully succeeded (retried
+      // above but still holding a position or a pending) leaves real
+      // exposure on what is supposed to be the dead side. Managing the
+      // survivor as one-sided - trailing it, arming the recovery SL - before
+      // that side is actually empty would protect it on the assumption of a
+      // hedge that has not really been removed yet, so both stay dormant
+      // until the side is confirmed clear (by the retry above, or by the
+      // broker).
+      bool winnerCutSideClear = (g_closeBaskets[b].winnerCutDirection == 0) ||
+         !SideHasOpenState(g_closeBaskets[b], -winningDirection);
 
-      if(g_closeBaskets[b].protectionArmed)
+      if(g_closeBaskets[b].winnerCutDirection != 0)
+        {
+         if(winnerCutSideClear)
+           {
+            UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
+            UpdateRecoveryProtection(g_closeBaskets[b]);
+           }
+        }
+      else
+        {
+         UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
+         int oppositeCount = (winningDirection == 1) ? sellCount : buyCount;
+         if(!g_closeBaskets[b].cleanTrailActive && oppositeCount == 0 && winnerCount >= 2 &&
+            g_closeBaskets[b].protectionArmed)
+           {
+            g_closeBaskets[b].cleanTrailActive = true;
+            SavePersistentState();
+            DeleteBasketPendingOrders(g_closeBaskets[b]);
+            UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
+           }
+        }
+
+      if(ProtectionLineTouched(g_closeBaskets[b], SymbolInfoDouble(_Symbol, SYMBOL_BID),
+                               SymbolInfoDouble(_Symbol, SYMBOL_ASK)))
+        {
+         RequestProtectionExit(g_closeBaskets[b]);
+         continue;
+        }
+      if(g_closeBaskets[b].protectionArmed && winnerCutSideClear)
          ApplyBasketProtection(g_closeBaskets[b]);
      }
   }
