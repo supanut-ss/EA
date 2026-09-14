@@ -1,19 +1,23 @@
-# XAUUSD One-Click Stop Grid EA v1.39
+# XAUUSD One-Click Stop Grid EA v1.42
 
 ## Scope and defaults
 
 Each newly filled manual entry (Magic 0) on the chart symbol starts an independent basket, unless the manual entry filter below excludes it. A basket is adopted only once real orders exist to manage it. Use a hedging account and one EA instance per account/server/symbol/magic scope.
 
+As of v1.40 the default grid step is 200 cents (2.000), tuned to close baskets faster (and more often via ordinary noise, not just real reversals) than the 300-cent default v1.36-v1.39 shipped with. The four arm/move distances below all move together with the step - each keeps the same ratio to it that it had at 300 cents - because InpTrailArmCents is validated to never exceed InpPriceStepCents and InpRecoverySLArmCents to always stay strictly below it; changing the step without rescaling these throws INIT_PARAMETERS_INCORRECT. Every worked example elsewhere in this document (the opening ladder, the Mode 2 recovery-level tables) still uses the older 300-cent/3.000 step for its numbers, since rewriting every example to 200 cents changes no relationship being illustrated - do the same substitution (2.000 for 3.000, and rescale the other three inputs the same way) before comparing an example's numbers to a live 200-cent basket.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Levels per side | 5 | The manual position counts as level 1 on its side |
-| Grid step | 300 price cents = 3.000 | Independent of broker point size |
+| Grid step | 200 price cents = 2.000 | Independent of broker point size |
 | Lots | Manual lot, 0.03, 0.05, 0.07, 0.09 | Level 1 on each side mirrors the manual lot; later levels use odd multiples of 0.01 |
-| Price-following trailing distance | 300 price cents = 3.000 | Distance behind executable Bid/Ask for clean and post-cut baskets |
+| Price-following trailing distance | 200 price cents = 2.000 | Distance behind executable Bid/Ask for clean and post-cut baskets |
 | Base-line cushion | 0.050 | Used by the initial/pre-cut ladder, not by the fixed recovery SL |
-| Recovery SL milestone distance | 200 price cents = 2.000 | Measured from the intended recovery SL level; trailing is already active before this milestone |
+| Recovery SL milestone distance | 130 price cents = 1.300 | Measured from the intended recovery SL level; trailing is already active before this milestone |
 | Winner cut count | 3 | Winning-side open positions needed while opposite losing positions exist |
-| Pre-SL loser cut | 2 positions and 2.500 adverse | Superseded for the managed side once clean trailing is active, or from the moment a winner cut leaves that side surviving |
+| Clean trail minimum positions | 3 | Winning-side position count needed, opposite side still empty, before all remaining pendings are cancelled |
+| Pre-SL loser cut | 2 positions and 1.650 adverse | Superseded for the managed side once clean trailing is active, or from the moment a winner cut leaves that side surviving |
+| Post-cut grace | 0 (disabled) | Widens the survivor's starting protection floor to (grid step + this) behind the cut anchor, once per cut |
 | Maximum opening spread | 0.20 | Reject grid creation above this spread |
 | Pending cap | 100 | Per symbol/magic; reject a new grid if its full pending count does not fit |
 | Minimum margin level | 300% | 0 disables; reject a new grid whose fully filled levels would leave margin level below this |
@@ -80,22 +84,23 @@ Orders that cannot be selected yet are not treated as proof of a stripped tag.
 
 ## Mode 1: clean winning streak
 
-A clean basket has no opposite-side positions and has not undergone winner cut. Once the profitable side has at least two positions and its initial trailing line is established:
+A clean basket has no opposite-side positions and has not undergone winner cut. The ordinary ladder line first arms as soon as a second position exists on the profitable side (the usual "two positions before trailing" rule - see Shared exits below), but clean mode itself - cancelling every remaining pending order - waits for `InpCleanTrailMinPositions` (default 3): once the profitable side reaches that many positions with the opposite side still empty:
 
 1. Persist the clean-trend decision and protection direction.
-2. Delete **all pending orders belonging to this basket**, on both sides.
+2. Delete **all pending orders belonging to this basket**, on both sides - including any of the profitable side's own levels beyond `InpCleanTrailMinPositions` that never got the chance to fill.
 3. Retry failed deletions on later ticks without suspending protection.
 4. Keep the selected direction authoritative even if its profit later turns negative.
 5. Continue price-following trailing without needing more grid fills.
 
-The initial line uses the previous position's entry plus 0.050 for Buy, or minus 0.050 for Sell. Thereafter the clean candidate follows Bid minus 3.000 for Buy, or Ask plus 3.000 for Sell, retaining whichever line is tighter. An existing tighter stop is never loosened. The legacy armed-ladder candidate may also tighten the line when applicable. No fixed budget target exists in this clean mode.
+The initial line (armed at two positions, before clean mode itself) uses the previous position's entry plus 0.050 for Buy, or minus 0.050 for Sell. Thereafter the clean candidate follows Bid minus 3.000 for Buy, or Ask plus 3.000 for Sell, retaining whichever line is tighter. An existing tighter stop is never loosened. The legacy armed-ladder candidate may also tighten the line when applicable. No fixed budget target exists in this clean mode.
 
-| Clean Buy example | Behavior |
+| Clean Buy example (`InpCleanTrailMinPositions` = 3) | Behavior |
 | --- | --- |
 | Only Buy at 4000 | No trailing yet |
-| Second Buy fills at 4003; Buy side is profitable | Initial line 4000.050; latch clean mode and delete all basket pendings |
-| Bid advances to 4007 | Price-following candidate 4004.000; raise SL if it improves the existing line |
-| Bid advances to 4008 | Candidate 4005.000; continue trailing |
+| Second Buy fills at 4003; Buy side is profitable | Ordinary ladder line arms at 4000.050; pendings (including the 3rd level and beyond) stay live |
+| Third Buy fills at 4006 | Latch clean mode now - delete every remaining basket pending, both sides; the 4th/5th Buy levels never get the chance to fill |
+| Bid advances to 4009 | Price-following candidate 4006.000; raise SL if it improves the existing line |
+| Bid advances to 4010 | Candidate 4007.000; continue trailing |
 | Bid returns to the active line | Latch a full-basket market exit and retry until empty |
 
 The previous 2.500 loser-cut rule is skipped for the clean direction once this mode is active, allowing the requested trailing SL to control its pullback exit. Other safety checks remain. A failed cancellation can still fill an order; the latch continues pending retirement and the basket retains protection. It does not silently resume grid expansion.
@@ -112,6 +117,8 @@ Winner cut starts when that side has at least three positions and the opposite s
 
 It persists the decision before attempting to close every position and pending order on the opposite side. The surviving side's pending orders remain until another exit deletes them. Failed side closes are retried; budget and protection continue in the same tick.
 
+Management of the survivor - trailing, the recovery SL milestone, the post-cut grace floor below - stays dormant until the cut side is confirmed fully clear (no open position, no pending order), so nothing treats a hedge that has not really been removed yet as gone.
+
 ### Exact recovery levels
 
 | Quantity | Buy survivor | Sell survivor |
@@ -120,7 +127,13 @@ It persists the decision before attempting to close every position and pending o
 | Intended fixed SL | anchor + (k-1) * grid step | anchor - (k-1) * grid step |
 | SL arming quote | Bid >= fixed SL + 2.000 | Ask <= fixed SL - 2.000 |
 
-The arming comparison is inclusive. No 0.050 cushion is added to the recovery SL milestone. Before price actually reaches the intended fixed SL level (anchor for k=1, anchor + (k-1) grid steps for higher k), a post-cut basket trails exactly like an ordinary mixed basket - the same previous-entry/newest-entry ladder, no price-following - so K-mode is never tighter than the no-cut case during that approach. Only once price reaches that level does price-following take over: Buy follows Bid minus 3.000; Sell follows Ask plus 3.000. The existing ladder candidate and any tighter protection are retained throughout, so the switch can only improve the line, never loosen it. Trailing remains active even with just one surviving position, and it continues after the milestone without moving the SL backward. The milestone is therefore a minimum protection level in the profitable direction, not an instruction to replace a tighter line.
+The arming comparison is inclusive. No 0.050 cushion is added to the recovery SL milestone. Before price actually reaches the intended fixed SL level (anchor for k=1, anchor + (k-1) grid steps for higher k), a post-cut basket trails exactly like an ordinary mixed basket - the same previous-entry/newest-entry ladder, no price-following - so K-mode is never tighter than the no-cut case during that approach (the post-cut grace floor below is the one deliberate exception: it can loosen that starting line once, never tighten it). Only once price reaches that level does price-following take over: Buy follows Bid minus 3.000; Sell follows Ask plus 3.000. The existing ladder candidate and any tighter protection are retained throughout, so the switch can only improve the line, never loosen it. Trailing remains active even with just one surviving position, and it continues after the milestone without moving the SL backward. The milestone is therefore a minimum protection level in the profitable direction, not an instruction to replace a tighter line.
+
+### Post-cut grace floor
+
+The ordinary approach-phase ladder above sits about one grid step behind the survivor's newest entry - identical to an ordinary mixed basket, by design. That is frequently tight enough that normal intra-swing noise, not a real reversal, closes the basket moments after a cut that was otherwise the right call. `InpPostCutGraceCents` (0 = disabled) widens that **starting** line only: the first time the cut side is confirmed clear, if the ladder line in place at that moment is tighter than (grid step + grace) behind the cut anchor, it is loosened out to that floor. It fires at most once per cut - tracked by its own persisted flag, restored across a restart - and every tick after that runs the ordinary approach-phase ladder, arm trigger, and recovery-SL milestone exactly as described above, tightening only, never loosening again. A grace floor that would already be looser than the current line is a no-op; a broker-side stop still installed from before the cut is retained as a fallback exactly as any other line change retains one.
+
+With Buy anchor 4006, grid step 3.000, and `InpPostCutGraceCents` = 200 (2.000): the ordinary ladder would start at roughly 4003.050 (one step back plus the spread buffer); the grace floor instead starts it at 4006 - (3.000 + 2.000) + 0.050 = 4001.050. Price still has to run the same distance to reach the recovery SL milestone (4006 for k=1) and the budget target (4009) - grace only changes how much room the survivor has on the way there, not where those two levels sit.
 
 For example, with Buy anchor 4006 and unchanged Buy entries 4000/4003/4006: for k=1 (intended SL = anchor = 4006), Bid 4005 still trails on the ladder alone (candidate 4003.050, identical to a no-cut basket at that quote); once Bid reaches 4006 price-following joins in, and Bid 4008 arms the milestone at 4006, with the budget still at 4009. For k=2 (intended SL = anchor + 3.000 = 4009), the ladder alone governs all the way through Bid 4008; Bid 4009 brings price-following into the comparison, Bid 4011 arms the milestone at 4009, and the budget still exits at 4012. New fills can produce a tighter ladder candidate on their own, independent of this switch. Only clean mode retires all pending orders; K-mode trailing does not delete surviving-side pending orders.
 
@@ -176,7 +189,7 @@ A broker SL/TP exit at the formula line is handled in OnTradeTransaction even if
 | Transient grid refusal | Queue the request and retry on later ticks until the window closes, price leaves one grid step of the entry, or the manual position is closed |
 | Manual partial close | Remaining positions are still managed; no automatic full exit solely for a manual partial close |
 
-State version 6 stores clean retirement as field C, recovery SL arming as field J, and the retained pre-recovery line/direction as fields Y/Z. Every actual line change and mode decision is written. Flushing those writes to disk is throttled: latched decisions - market exit, both cuts, clean retirement, recovery SL arming, and the first arming of a protection line - flush immediately, while a routine trailing step flushes at most once a second, because it repeats on nearly every tick of a trend. An unclean shutdown can therefore lose up to one second of line movement, which would leave a broker SL/TP exit at the newer line unattributed. Persistence uses terminal Global Variables and does not transfer to another terminal automatically.
+State version 6 stores clean retirement as field C, recovery SL arming as field J, and the retained pre-recovery line/direction as fields Y/Z. State version 7 adds the post-cut grace flag as field F, restored only while a winner cut is still recorded, so a restart cannot re-loosen an already-tightened line. Every actual line change and mode decision is written. Flushing those writes to disk is throttled: latched decisions - market exit, both cuts, clean retirement, recovery SL arming, the post-cut grace floor, and the first arming of a protection line - flush immediately, while a routine trailing step flushes at most once a second, because it repeats on nearly every tick of a trend. An unclean shutdown can therefore lose up to one second of line movement, which would leave a broker SL/TP exit at the newer line unattributed. Persistence uses terminal Global Variables and does not transfer to another terminal automatically.
 
 The basket exit line is also installed as a take profit on the hedge side, and that take profit is only ever moved nearer the market, so an optional per-pending TP is never pushed further away by the basket line.
 

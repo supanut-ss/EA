@@ -132,6 +132,7 @@ let InpUseRecoveryFormula;
 let InpMaxLosersBeforeCut;
 let InpOrdersPerSide;
 let InpWinnerCutCount;
+let InpCleanTrailMinPositions;
 let InpRecoverySLArmCents;
 let InpMagicNumber = 20260904;
 let InpMinMarginLevelPercent;
@@ -146,6 +147,7 @@ let marginPerLot;
 let calcMarginFails;
 let volumeMin;
 let InpProtectSpreadBuffer = 0.05;
+let InpPostCutGraceCents = 0;
 let bid;
 let ask;
 let live;
@@ -175,6 +177,8 @@ function newBasket() {
     winnerCutDirection: 0,
     cleanTrailActive: false,
     recoverySLArmed: false,
+    postCutGraceArmed: false,
+    postCutGraceBaselineEntry: 0,
     retainedProtectionPrice: 0,
     retainedProtectionDirection: 0,
   };
@@ -187,6 +191,7 @@ function reset(direction = 1) {
   InpMaxLosersBeforeCut = 0;
   InpOrdersPerSide = 5;
   InpWinnerCutCount = 3;
+  InpCleanTrailMinPositions = 2; // matches the pre-v1.42 hardcoded threshold; tests exercising the new input set it explicitly
   InpRecoverySLArmCents = 200;
   InpMinMarginLevelPercent = 300;
   InpFixedLotUnit = 0.01;
@@ -445,6 +450,23 @@ for (const direction of [1, -1]) {
     const ratcheted = basket.protectionPrice;
     UpdateTrailingProtection(basket, direction);
     assert(saves === 1 && basket.protectionPrice === ratcheted, 'unchanged line wrote persistent state');
+  });
+
+  test(`clean trail waits for the configured position count before cancelling pendings, direction ${direction}`, () => {
+    reset(direction);
+    InpCleanTrailMinPositions = 3;
+    Object.assign(live, direction === 1
+      ? { buys: 2, sells: 0, buyAdvance: 10, sellAdvance: 0, buyLosers: 0, sellLosers: 0 }
+      : { buys: 0, sells: 2, buyAdvance: 0, sellAdvance: 10, buyLosers: 0, sellLosers: 0 });
+    ManageFormulaClose();
+    const basket = g_closeBaskets[0];
+    assert(!basket.cleanTrailActive && pendingDeletes === 0,
+      '2 positions triggered clean trail despite a configured minimum of 3');
+
+    Object.assign(live, direction === 1 ? { buys: 3 } : { sells: 3 });
+    ManageFormulaClose();
+    assert(basket.cleanTrailActive && pendingDeletes === 1,
+      'reaching the configured minimum of 3 did not trigger clean trail');
   });
 
   test(`clean trail retires pending and follows price direction ${direction}`, () => {
@@ -927,5 +949,111 @@ test('room under the concurrent cap still accepts', () => {
   InpMaxConcurrentBaskets = 2;
   assert(ManualEntryAccepted(MANUAL_LOT), 'the basket cap rejected an entry that fits');
 });
+
+// A freshly-cut Buy survivor: anchor 4006 (matches live.newestBuy so the
+// base ladder candidate and the grace floor are computed from the same
+// starting point), k=1 (RecoveryStopPrice = anchor exactly). bid/ask are
+// pulled well below both the arm trigger (newestEntry + step = 4009) and
+// RecoveryStopPrice (4006), so only the base-candidate/grace-floor compare
+// is in play - the assertions would otherwise be at the mercy of whichever
+// of the three candidates happens to win.
+function armGraceBasket(direction, graceCents) {
+  reset(direction);
+  InpPostCutGraceCents = graceCents;
+  const basket = g_closeBaskets[0];
+  basket.winnerCutDirection = direction;
+  basket.winnerCutAnchorPrice = direction === 1 ? 4006 : 4009;
+  basket.bankedLoserCount = 1;
+  if (direction === 1) { bid = 4004; ask = 4004.2; }
+  else { bid = 4010.8; ask = 4011; }
+  return basket;
+}
+
+test('grace floor widens the first post-cut line, direction 1', () => {
+  const basket = armGraceBasket(1, 200);
+  UpdateTrailingProtection(basket, 1);
+  // floor = anchor(4006) - (step 3 + grace 2) + buffer 0.05 = 4001.05,
+  // looser than the ordinary ladder (previousBuy 4003 + buffer = 4003.05).
+  assert(near(basket.protectionPrice, 4001.05), 'grace floor did not widen the first post-cut line');
+  assert(basket.postCutGraceArmed === true, 'grace baseline was not captured');
+  assert(near(basket.postCutGraceBaselineEntry, 4003), 'grace baseline did not record previousEntry at cut');
+});
+
+test('grace floor widens the first post-cut line, direction -1', () => {
+  const basket = armGraceBasket(-1, 200);
+  UpdateTrailingProtection(basket, -1);
+  // floor = anchor(4009) + (step 3 + grace 2) - buffer 0.05 = 4013.95,
+  // looser than the ordinary ladder (previousSell 4012 - buffer = 4011.95).
+  assert(near(basket.protectionPrice, 4013.95), 'grace floor did not widen the first post-cut line');
+});
+
+test('grace floor is not undone by the very next tick (the bug this guards against)', () => {
+  const basket = armGraceBasket(1, 200);
+  UpdateTrailingProtection(basket, 1);
+  const widened = basket.protectionPrice;
+  const savesAfterFirst = saves;
+  // Nothing about the market changed - same previousEntry, same quotes -
+  // yet a naive implementation recomputes the tight ladder candidate every
+  // tick and, since it is "better" than the wide floor, the ordinary
+  // never-loosen ratchet would wave it straight through.
+  UpdateTrailingProtection(basket, 1);
+  assert(near(basket.protectionPrice, widened), 'grace floor was silently re-tightened on the following tick');
+  assert(saves === savesAfterFirst, 'a no-op tick after grace still wrote persistent state');
+});
+
+test('a new fill lets genuine tightening straight through the grace floor', () => {
+  const basket = armGraceBasket(1, 200);
+  UpdateTrailingProtection(basket, 1);
+  const widened = basket.protectionPrice;
+  // A new level fills: what was the newest entry (4006) becomes the
+  // previous one, and a fresh entry (4009) becomes the newest. previousEntry
+  // has now genuinely moved past the grace baseline (4003).
+  live.previousBuy = 4006;
+  live.newestBuy = 4009;
+  UpdateTrailingProtection(basket, 1);
+  assert(basket.protectionPrice > widened, 'the grace floor blocked a legitimately tighter line from a new fill');
+  assert(near(basket.protectionPrice, 4006.05), 'the post-fill ladder candidate was not applied');
+});
+
+test('grace widens an inherited mixed-basket line even when it is tighter than the floor', () => {
+  const basket = armGraceBasket(1, 200);
+  basket.protectionArmed = true;
+  basket.protectionDirection = 1;
+  basket.protectionPrice = 4004.5; // a pre-cut trailing line, tighter than the 4001.05 floor
+  UpdateTrailingProtection(basket, 1);
+  // This is exactly the case grace exists for: a line inherited from the
+  // mixed-basket phase, protecting a hedge the cut just removed, is
+  // deliberately loosened out to the floor - once.
+  assert(near(basket.protectionPrice, 4001.05), 'an inherited tighter line was not widened to the grace floor');
+});
+
+test('grace does not re-loosen a line that only became tighter after the baseline tick', () => {
+  const basket = armGraceBasket(1, 200);
+  UpdateTrailingProtection(basket, 1); // captures the baseline, widens to 4001.05
+  // A later, unrelated tightening - e.g. the arm trigger, or an operator
+  // manually installing a tighter stop - must not be pulled back out to
+  // the floor on some later tick just because grace once applied here.
+  basket.protectionPrice = 4004.5;
+  UpdateTrailingProtection(basket, 1);
+  assert(near(basket.protectionPrice, 4004.5), 'a later legitimate tightening was reverted by the grace floor');
+});
+
+test('a zero grace setting behaves exactly like no-cut trailing', () => {
+  const basket = armGraceBasket(1, 0);
+  UpdateTrailingProtection(basket, 1);
+  assert(near(basket.protectionPrice, 4003.05), 'a disabled grace setting still widened the line');
+  assert(basket.postCutGraceArmed === false, 'the baseline was captured despite grace being disabled');
+});
+
+test('grace floor retains the pre-cut line for a broker fill already in flight', () => {
+  const basket = armGraceBasket(1, 200);
+  basket.protectionArmed = true;
+  basket.protectionDirection = 1;
+  basket.protectionPrice = 4003.5; // a mixed-basket-era line, tighter than the floor
+  UpdateTrailingProtection(basket, 1);
+  assert(near(basket.retainedProtectionPrice, 4003.5) && basket.retainedProtectionDirection === 1,
+    'the pre-widening line was not retained for a broker fill already in flight');
+});
+
 
 console.log(`PASS: ${passed} deterministic exit and grid-placement scenarios using extracted EA functions and mocked broker state`);

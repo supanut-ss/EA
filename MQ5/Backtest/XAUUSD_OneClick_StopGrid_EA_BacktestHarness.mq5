@@ -4,12 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid (BACKTEST HARNESS - not for live use)"
-#property version   "1.39"
-// TEST-ONLY FILE. This is XAUUSD_OneClick_StopGrid_EA.mq5 v1.39 plus one
-// bolted-on block (marked DEBUG HARNESS below) that fires the "manual"
-// market entries the production EA expects a human to place, so the
-// Strategy Tester - which can only ever run one Expert - has something to
-// react to. It is never copied back into the production file.
+#property version   "1.41"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -28,7 +23,7 @@ input int      InpDebugDirectionMode   = 0;       // 0 = alternate Buy/Sell, 1 =
 
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
-input int      InpPriceStepCents       = 300;     // Grid distance in price cents; 300 = 3.000 (4000 -> 4003)
+input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
 input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = (2*level-1) * this, e.g. 0.01 -> 0.03, 0.05, 0.07, 0.09, ...
 
 input group "=== Optional SL / TP (price distance) ==="
@@ -38,12 +33,13 @@ input double   InpTakeProfitDistance   = 0.0;     // 0 = no TP; otherwise distan
 input group "=== Basket Exit Rules ==="
 input bool     InpUseFormulaClose       = true;    // Master switch for every basket exit rule
 input bool     InpUseRecoveryFormula    = true;    // SAFETY BREAKER gate: winning side count >= 2 * losing count + 1
-input int      InpTrailArmCents         = 300;     // Clean trailing distance and pre-cut ladder arm distance in price cents; 300 = 3.000
-input int      InpRecoverySLArmCents    = 200;     // Arm the fixed recovery SL after price passes that SL by 2.000
+input int      InpTrailArmCents         = 200;     // Clean trailing distance and pre-cut ladder arm distance in price cents; 200 = 2.000
+input int      InpRecoverySLArmCents    = 130;     // Arm the fixed recovery SL after price passes that SL by 1.300
+input int      InpPostCutGraceCents     = 0;       // 0 = disabled; otherwise widen the survivor's protection floor to (grid step + this) behind the cut anchor, set once right after WINNER CUT clears its losing side
 input double   InpProtectSpreadBuffer   = 0.050;   // Fixed cushion added to every trailing SL step, in price units
 input int      InpWinnerCutCount        = 3;       // WINNER CUT: 0 = disabled; otherwise close the losing side (positions + pendings) once the winning side reaches this many positions
 input int      InpMaxLosersBeforeCut    = 2;       // LOSER CUT: 0 = disabled; otherwise close everything once one side holds this many POSITIONS (P/L ignored) and the newest is passed by the distance below
-input int      InpLoserCutMoveCents     = 250;     // LOSER CUT adverse move against the newest entry on that side, in price cents; 250 = 2.500
+input int      InpLoserCutMoveCents     = 165;     // LOSER CUT adverse move against the newest entry on that side, in price cents; 165 = 1.650
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260904;
@@ -87,6 +83,8 @@ struct CloseBasket
    int    winnerCutDirection;   // the surviving side's direction once WINNER CUT fired (0 = never cut)
    bool   cleanTrailActive;    // clean trend: retire all pending orders and trail price
    bool   recoverySLArmed;     // fixed post-cut SL has reached its arming threshold
+   bool   postCutGraceArmed;   // the post-cut grace baseline has been captured for this cut
+   double postCutGraceBaselineEntry; // previousEntry at the moment grace was captured; unchanged = grace floor still applies
    double retainedProtectionPrice; // pre-recovery broker line may still execute
    int    retainedProtectionDirection;
   };
@@ -133,6 +131,7 @@ int OnInit()
       InpGridRetrySeconds < 0 ||
       InpTrailArmCents <= 0 || InpRecoverySLArmCents <= 0 ||
       InpRecoverySLArmCents >= InpPriceStepCents ||
+      InpPostCutGraceCents < 0 ||
       InpProtectSpreadBuffer < 0.0 ||
       InpWinnerCutCount < 0 ||
       InpMaxLosersBeforeCut < 0 ||
@@ -210,6 +209,10 @@ int OnInit()
    Print("OneClickGrid: WINNER CUT BUDGET = after the cut, the surviving side may extend ",
          "k grid steps past its entry at cut time (k = losers banked at cut) before ",
          "the whole basket is closed at market as a backstop");
+   Print("OneClickGrid: POST-CUT GRACE = ", InpPostCutGraceCents > 0
+         ? StringFormat("once the cut side clears, widen the survivor's starting protection floor to grid step + %s behind the cut anchor (once per cut; ordinary trailing only tightens it from there)",
+                        DoubleToString(InpPostCutGraceCents / 100.0, _Digits))
+         : "disabled - the survivor's post-cut floor is the ordinary one-grid-step ladder");
    if(InpUseRecoveryFormula)
       Print("OneClickGrid: SAFETY BREAKER = market-close the basket once k > ",
             (int)((InpOrdersPerSide - 1) / 2),
@@ -1149,6 +1152,8 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].winnerCutDirection = 0;
    g_closeBaskets[size].cleanTrailActive = false;
    g_closeBaskets[size].recoverySLArmed = false;
+   g_closeBaskets[size].postCutGraceArmed = false;
+   g_closeBaskets[size].postCutGraceBaselineEntry = 0.0;
    g_closeBaskets[size].retainedProtectionPrice = 0.0;
    g_closeBaskets[size].retainedProtectionDirection = 0;
    return(true);
@@ -1304,7 +1309,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P","X","K","W","G","C","J","Y","Z"};
+   string fields[] = {"RH","RL","MH","ML","T","E","L","Q","A","D","P","X","K","W","G","C","J","Y","Z","F","I"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -1334,6 +1339,8 @@ void SavePersistentState(const bool forceFlush = true)
       WriteStateValue(BasketStateKey(i, "G"), (double)g_closeBaskets[i].winnerCutDirection);
       WriteStateValue(BasketStateKey(i, "C"), g_closeBaskets[i].cleanTrailActive ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "J"), g_closeBaskets[i].recoverySLArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "F"), g_closeBaskets[i].postCutGraceArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "I"), g_closeBaskets[i].postCutGraceBaselineEntry);
       WriteStateValue(BasketStateKey(i, "Y"), g_closeBaskets[i].retainedProtectionPrice);
       WriteStateValue(BasketStateKey(i, "Z"), (double)g_closeBaskets[i].retainedProtectionDirection);
      }
@@ -1341,7 +1348,7 @@ void SavePersistentState(const bool forceFlush = true)
       DeleteBasketStateSlot(i);
 
    WriteStateValue(g_statePrefix + ".BC", (double)basketCount);
-   WriteStateValue(g_statePrefix + ".V", 6.0);
+   WriteStateValue(g_statePrefix + ".V", 7.0);
 
    // Every value above is already stored; the flush only forces it to disk.
    // Latched decisions ask for that immediately. A routine trailing step
@@ -1367,7 +1374,7 @@ void LoadPersistentBaskets()
       return;
 
    int stateVersion = (int)MathRound(versionValue);
-   if(stateVersion < 1 || stateVersion > 6)
+   if(stateVersion < 1 || stateVersion > 7)
       return;
 
    int count = (int)MathRound(countValue);
@@ -1460,6 +1467,14 @@ void LoadPersistentBaskets()
          if(ReadStateValue(BasketStateKey(i, "J"), recoveryValue) && recoveryValue > 0.5 &&
             g_closeBaskets[index].winnerCutDirection != 0)
             g_closeBaskets[index].recoverySLArmed = true;
+         double graceValue = 0.0, graceBaselineValue = 0.0;
+         if(stateVersion >= 7 && ReadStateValue(BasketStateKey(i, "F"), graceValue) && graceValue > 0.5 &&
+            ReadStateValue(BasketStateKey(i, "I"), graceBaselineValue) &&
+            g_closeBaskets[index].winnerCutDirection != 0)
+           {
+            g_closeBaskets[index].postCutGraceArmed = true;
+            g_closeBaskets[index].postCutGraceBaselineEntry = graceBaselineValue;
+           }
          double retainedPrice = 0.0, retainedDirection = 0.0;
          if(g_closeBaskets[index].winnerCutDirection != 0 &&
             ReadStateValue(BasketStateKey(i, "Y"), retainedPrice) && retainedPrice > 0.0 &&
@@ -2009,6 +2024,42 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
       : ((direction == 1) ? bid : ask) - direction * TrailArmPrice();
    string layer = "base - previous entry + spread buffer";
 
+   // Post-cut grace. The base candidate above sits about one grid step
+   // behind the survivor's newest entry - tight enough that ordinary
+   // intra-swing noise, not a real reversal, often closes the basket
+   // moments after a cut that was otherwise the right call. The first time
+   // this runs for a given cut, previousEntry is banked as the grace
+   // baseline; for as long as nothing has actually changed since then (no
+   // new fill has moved previousEntry), the base candidate is floored at
+   // (grid step + InpPostCutGraceCents) behind the cut anchor instead. The
+   // moment a new fill, the arm trigger below, or price-following earns a
+   // genuinely tighter line, this stops applying on its own - it is a
+   // comparison against a fixed floor re-evaluated every tick, not a
+   // one-time override, so nothing here can undo progress made later.
+   bool graceJustBaselined = false;
+   bool graceFloorApplied  = false;
+   if(basket.winnerCutDirection != 0 && InpPostCutGraceCents > 0)
+     {
+      if(!basket.postCutGraceArmed)
+        {
+         basket.postCutGraceArmed = true;
+         basket.postCutGraceBaselineEntry = previousEntry;
+         graceJustBaselined = true;
+        }
+      if(basket.winnerCutAnchorPrice > 0.0 &&
+         MathAbs(previousEntry - basket.postCutGraceBaselineEntry) < g_tickSize / 2.0)
+        {
+         double graceFloor = basket.winnerCutAnchorPrice -
+            direction * (GridStepPrice() + InpPostCutGraceCents / 100.0) + direction * InpProtectSpreadBuffer;
+         if(IsBetterLine(candidate, graceFloor, direction))
+           {
+            candidate = graceFloor;
+            layer = "post-cut grace floor";
+            graceFloorApplied = true;
+           }
+        }
+     }
+
    double armTrigger = newestEntry + direction * TrailArmPrice();
    bool armed = (direction == 1) ? (bid > armTrigger) : (ask < armTrigger);
    double armedCandidate = newestEntry + direction * InpProtectSpreadBuffer;
@@ -2043,7 +2094,17 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
 
    double line = NormalizePriceForDirection(candidate, -direction);
 
-   if(basket.protectionArmed && basket.protectionDirection == direction &&
+   // The tick that just banked the grace baseline, and on which the floor
+   // actually had to replace the ordinary candidate, is the one deliberate
+   // exception to the ratchet below: it is allowed to loosen a line
+   // inherited from the mixed-basket phase (which protected a hedge this
+   // cut just removed) out to the grace floor. Every other tick - including
+   // every later one that still recomputes the same floor because nothing
+   // has changed, and this same tick when grace made no difference to the
+   // candidate - only ever improves on basket.protectionPrice, exactly as
+   // before grace existed.
+   bool graceBypassRatchet = graceJustBaselined && graceFloorApplied;
+   if(!graceBypassRatchet && basket.protectionArmed && basket.protectionDirection == direction &&
       !IsBetterLine(line, basket.protectionPrice, direction))
       return;
 
@@ -2063,7 +2124,7 @@ void UpdateTrailingProtection(CloseBasket &basket, const int direction)
    // Exact recovery is needed to attribute broker SL/TP exits after restart,
    // so the first arming is forced to disk at once; later steps ride the
    // flush interval, since each one supersedes the last anyway.
-   SavePersistentState(firstArming);
+   SavePersistentState(firstArming || graceBypassRatchet);
 
    Print("OneClickGrid: trailing line #", basket.rootOrderTicket,
          " -> ", DoubleToString(line, _Digits),
