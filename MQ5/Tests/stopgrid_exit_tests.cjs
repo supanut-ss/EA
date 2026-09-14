@@ -6,6 +6,11 @@ const path = require('node:path');
 const eaPath = path.join(__dirname, '..', 'Experts', 'XAUUSD_OneClick_StopGrid_EA.mq5');
 const source = fs.readFileSync(eaPath, 'utf8');
 const functionNames = [
+  'PendingGridStillValid',
+  'LotForLevel',
+  'LevelMargin',
+  'GridMarginIsAffordable',
+  'ManualEntryAccepted',
   'IsBetterLine',
   'ProtectionLineTouched',
   'RequestProtectionExit',
@@ -32,6 +37,11 @@ function extractFunction(name) {
 }
 
 const argumentNames = {
+  PendingGridStillValid: ['manualPrice', 'direction', 'expiryMsc', 'bid', 'ask', 'nowMsc'],
+  LotForLevel: ['level', 'manualLot'],
+  LevelMargin: ['direction', 'rawPrice', 'requestedLot'],
+  GridMarginIsAffordable: ['direction', 'manualPrice', 'manualLot', 'projectedLevel', 'gridMargin'],
+  ManualEntryAccepted: ['manualLot'],
   IsBetterLine: ['candidate', 'current', 'direction'],
   ProtectionLineTouched: ['basket', 'bid', 'ask'],
   RequestProtectionExit: ['basket'],
@@ -70,11 +80,15 @@ function transformFunction(name, original) {
     /double cutAnchorEntry, cutAnchorPrevious;\s*if\(!GetTrailingAnchors\(g_closeBaskets\[b\], winningDirection, cutAnchorEntry, cutAnchorPrevious\) \|\|\s*cutAnchorEntry <= 0\.0\)/,
     'let { ok: cutAnchorOk, newestEntry: cutAnchorEntry, previousEntry: cutAnchorPrevious } = GetTrailingAnchors(g_closeBaskets[b], winningDirection);\n         if(!cutAnchorOk || cutAnchorEntry <= 0.0)',
   );
+  code = code.replace(
+    /double margin = 0\.0;\s*ResetLastError\(\);\s*if\(!OrderCalcMargin\(type, _Symbol, lot, price, margin\) \|\| margin < 0\.0\)/,
+    'let margin = 0.0;\n   ResetLastError();\n   let calcOk;\n   ({ ok: calcOk, margin } = OrderCalcMargin(type, _Symbol, lot, price));\n   if(!calcOk || margin < 0.0)',
+  );
   code = transformGetBasketStats(code);
   code = code
     .replace(/\((?:ENUM_DEAL_ENTRY|ENUM_DEAL_REASON|ENUM_DEAL_TYPE|ulong|uint|long|int|double)\)/g, '')
-    .replace(/\b(?:double|int|bool|string|ulong|uint|long|ENUM_DEAL_REASON|ENUM_DEAL_TYPE)\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*;/g, 'let $1;')
-    .replace(/\b(?:double|int|bool|string|ulong|uint|long|ENUM_DEAL_REASON|ENUM_DEAL_TYPE)\s+([A-Za-z_]\w*)\s*=/g, 'let $1 =')
+    .replace(/\b(?:double|int|bool|string|ulong|uint|long|ENUM_DEAL_REASON|ENUM_DEAL_TYPE|ENUM_ORDER_TYPE)\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*;/g, 'let $1;')
+    .replace(/\b(?:double|int|bool|string|ulong|uint|long|ENUM_DEAL_REASON|ENUM_DEAL_TYPE|ENUM_ORDER_TYPE)\s+([A-Za-z_]\w*)\s*=/g, 'let $1 =')
     .replace(/for\(int\s+/g, 'for(let ');
   return code;
 }
@@ -96,6 +110,11 @@ const DEAL_TP = 9;
 const ORDER_SYMBOL = 10;
 const ORDER_MAGIC = 11;
 const ORDER_COMMENT = 12;
+const SYMBOL_MARGIN_HEDGED = 13;
+const ACCOUNT_EQUITY = 14;
+const ACCOUNT_MARGIN = 15;
+const ORDER_TYPE_BUY = 16;
+const ORDER_TYPE_SELL = 17;
 const DEAL_ENTRY_OUT = 20;
 const DEAL_ENTRY_IN = 21;
 const DEAL_REASON_SL = 30;
@@ -115,6 +134,17 @@ let InpOrdersPerSide;
 let InpWinnerCutCount;
 let InpRecoverySLArmCents;
 let InpMagicNumber = 20260904;
+let InpMinMarginLevelPercent;
+let InpFixedLotUnit;
+let InpMinManualLot;
+let InpMaxManualLot;
+let InpMaxConcurrentBaskets;
+let marginHedged;
+let equity;
+let usedMargin;
+let marginPerLot;
+let calcMarginFails;
+let volumeMin;
 let InpProtectSpreadBuffer = 0.05;
 let bid;
 let ask;
@@ -158,13 +188,24 @@ function reset(direction = 1) {
   InpOrdersPerSide = 5;
   InpWinnerCutCount = 3;
   InpRecoverySLArmCents = 200;
+  InpMinMarginLevelPercent = 300;
+  InpFixedLotUnit = 0.01;
+  InpMinManualLot = 0;
+  InpMaxManualLot = 0;
+  InpMaxConcurrentBaskets = 0;
+  marginHedged = 0;
+  equity = 10000;
+  usedMargin = 0;
+  marginPerLot = 400;
+  calcMarginFails = false;
+  volumeMin = 0.01;
   bid = 4007;
   ask = 4007.2;
   live = direction === 1
-    ? { buys: 3, sells: 1, buyProfit: 20, sellProfit: -10, buyLosers: 0, sellLosers: 1,
+    ? { buys: 3, sells: 1, buyAdvance: 20, sellAdvance: -10, buyLosers: 0, sellLosers: 1,
         pendingBuy: 1, pendingSell: 1, newestBuy: 4006, previousBuy: 4003,
         newestSell: 4009, previousSell: 4012 }
-    : { buys: 1, sells: 3, buyProfit: -10, sellProfit: 20, buyLosers: 1, sellLosers: 0,
+    : { buys: 1, sells: 3, buyAdvance: -10, sellAdvance: 20, buyLosers: 1, sellLosers: 0,
         pendingBuy: 1, pendingSell: 1, newestBuy: 4006, previousBuy: 4003,
         newestSell: 4009, previousSell: 4012 };
   deal = {
@@ -200,7 +241,25 @@ function GridStepPrice() { return 3; }
 function TrailArmPrice() { return 3; }
 function LoserCutMovePrice() { return 2.5; }
 function NormalizePriceForDirection(value) { return value; }
-function SymbolInfoDouble(_symbol, property) { return property === SYMBOL_BID ? bid : ask; }
+function SymbolInfoDouble(_symbol, property) {
+  if (property === SYMBOL_MARGIN_HEDGED) return marginHedged;
+  return property === SYMBOL_BID ? bid : ask;
+}
+function AccountInfoDouble(property) {
+  return property === ACCOUNT_EQUITY ? equity : usedMargin;
+}
+function OrderCalcMargin(_type, _symbol, volume, _price) {
+  if (calcMarginFails) return { ok: false, margin: 0 };
+  return { ok: true, margin: volume * marginPerLot };
+}
+function NormalizeVolumeDown(requestedLot) {
+  return requestedLot >= volumeMin ? Math.round(requestedLot * 100) / 100 : 0;
+}
+function VolumeDigits() { return 2; }
+function ResetLastError() {}
+function GetLastError() { return 0; }
+function MathMax(a, b) { return Math.max(a, b); }
+function MathMin(a, b) { return Math.min(a, b); }
 function ArraySize(array) { return array.length; }
 function ArrayRemove(array, index, count) { array.splice(index, count); }
 function SavePersistentState() { saves += 1; }
@@ -227,9 +286,9 @@ function CloseSideAtMarket(_basket, direction) {
   sideCloses += 1;
   if (!sideCloseSucceeds) return;
   if (direction === 1) {
-    live.buys = 0; live.buyLosers = 0; live.buyProfit = 0; live.pendingBuy = 0;
+    live.buys = 0; live.buyLosers = 0; live.buyAdvance = 0; live.pendingBuy = 0;
   } else {
-    live.sells = 0; live.sellLosers = 0; live.sellProfit = 0; live.pendingSell = 0;
+    live.sells = 0; live.sellLosers = 0; live.sellAdvance = 0; live.pendingSell = 0;
   }
 }
 function GetBasketStats() {
@@ -237,9 +296,9 @@ function GetBasketStats() {
   return {
     buyCount: live.buys,
     sellCount: live.sells,
-    buyProfit: live.buyProfit,
-    sellProfit: live.sellProfit,
-    netProfit: live.buyProfit + live.sellProfit,
+    buyAdvance: live.buyAdvance,
+    sellAdvance: live.sellAdvance,
+    netProfit: live.buyAdvance + live.sellAdvance,
     buyLosingCount: live.buyLosers,
     sellLosingCount: live.sellLosers,
   };
@@ -391,8 +450,8 @@ for (const direction of [1, -1]) {
   test(`clean trail retires pending and follows price direction ${direction}`, () => {
     reset(direction);
     Object.assign(live, direction === 1
-      ? { buys: 2, sells: 0, buyProfit: 10, sellProfit: 0, buyLosers: 0, sellLosers: 0 }
-      : { buys: 0, sells: 2, buyProfit: 0, sellProfit: 10, buyLosers: 0, sellLosers: 0 });
+      ? { buys: 2, sells: 0, buyAdvance: 10, sellAdvance: 0, buyLosers: 0, sellLosers: 0 }
+      : { buys: 0, sells: 2, buyAdvance: 0, sellAdvance: 10, buyLosers: 0, sellLosers: 0 });
     pendingDeleteSucceeds = false;
     ManageFormulaClose();
     const basket = g_closeBaskets[0];
@@ -441,8 +500,8 @@ for (const direction of [1, -1]) {
       basket.winnerCutAnchorPrice = 4006;
       basket.bankedLoserCount = k;
       Object.assign(live, direction === 1
-        ? { buys: 3, sells: 0, buyProfit: 20, sellProfit: 0, buyLosers: 0, sellLosers: 0, pendingBuy: 0, pendingSell: 0 }
-        : { buys: 0, sells: 3, buyProfit: 0, sellProfit: 20, buyLosers: 0, sellLosers: 0, pendingBuy: 0, pendingSell: 0 });
+        ? { buys: 3, sells: 0, buyAdvance: 20, sellAdvance: 0, buyLosers: 0, sellLosers: 0, pendingBuy: 0, pendingSell: 0 }
+        : { buys: 0, sells: 3, buyAdvance: 0, sellAdvance: 20, buyLosers: 0, sellLosers: 0, pendingBuy: 0, pendingSell: 0 });
       const budget = 4006 + direction * k * 3;
       if (direction === 1) { bid = budget; ask = bid + 0.2; }
       else { ask = budget; bid = ask - 0.2; }
@@ -538,8 +597,13 @@ for (const direction of [1, -1]) {
       'prior formula line was not retained for delayed broker execution');
   });
 
+  // The cut distance is below one grid step and the survivor's ladder line
+  // sits a full step back, so a live loser cut on that side would always
+  // fire first - closing the very recovery the winner cut paid for. The
+  // survivor is therefore exempt from the moment of the cut, not from the
+  // later recovery-SL arming.
   for (const armed of [false, true]) {
-    test(`loser cut ${armed ? 'yields to' : 'precedes'} recovery SL direction ${direction}`, () => {
+    test(`winner-cut survivor is exempt from the loser cut ${armed ? 'after' : 'before'} the recovery SL arms direction ${direction}`, () => {
       reset(direction);
       const basket = g_closeBaskets[0];
       basket.winnerCutDirection = direction;
@@ -551,16 +615,33 @@ for (const direction of [1, -1]) {
       basket.protectionPrice = 4006 + direction * 3;
       InpMaxLosersBeforeCut = 2;
       Object.assign(live, direction === 1
-        ? { buys: 3, sells: 0, buyProfit: 10, sellProfit: 0, buyLosers: 0, sellLosers: 0,
+        ? { buys: 3, sells: 0, buyAdvance: 10, sellAdvance: 0, buyLosers: 0, sellLosers: 0,
             pendingBuy: 0, pendingSell: 0, newestBuy: 4012, previousBuy: 4009 }
-        : { buys: 0, sells: 3, buyProfit: 0, sellProfit: 10, buyLosers: 0, sellLosers: 0,
+        : { buys: 0, sells: 3, buyAdvance: 0, sellAdvance: 10, buyLosers: 0, sellLosers: 0,
             pendingBuy: 0, pendingSell: 0, newestSell: 4000, previousSell: 4003 });
       if (direction === 1) { bid = 4009.4; ask = 4009.6; }
       else { ask = 4002.6; bid = 4002.4; }
       ManageFormulaClose();
-      assert(basket.marketExitRequested === !armed, 'loser-cut precedence did not match recovery arm state');
+      assert(!basket.marketExitRequested,
+        'the loser cut closed the survivor the winner cut paid for');
     });
   }
+
+  test(`a basket that never cut still takes the loser cut direction ${direction}`, () => {
+    reset(direction);
+    const basket = g_closeBaskets[0];
+    InpMaxLosersBeforeCut = 2;
+    Object.assign(live, direction === 1
+      ? { buys: 2, sells: 1, buyAdvance: 10, sellAdvance: -1, buyLosers: 0, sellLosers: 0,
+          pendingBuy: 0, pendingSell: 0, newestBuy: 4012, previousBuy: 4009 }
+      : { buys: 1, sells: 2, buyAdvance: -1, sellAdvance: 10, buyLosers: 0, sellLosers: 0,
+          pendingBuy: 0, pendingSell: 0, newestSell: 4000, previousSell: 4003 });
+    if (direction === 1) { bid = 4009.4; ask = 4009.6; }
+    else { ask = 4002.6; bid = 4002.4; }
+    ManageFormulaClose();
+    assert(basket.marketExitRequested,
+      'the loser cut stopped working on an ordinary mixed basket');
+  });
 
   test(`armed recovery still guards opposite side direction ${direction}`, () => {
     reset(direction);
@@ -574,10 +655,10 @@ for (const direction of [1, -1]) {
     basket.protectionPrice = 4006;
     InpMaxLosersBeforeCut = 2;
     Object.assign(live, direction === 1
-      ? { buys: 3, sells: 2, buyProfit: 10, sellProfit: -2, buyLosers: 0, sellLosers: 0,
+      ? { buys: 3, sells: 2, buyAdvance: 10, sellAdvance: -2, buyLosers: 0, sellLosers: 0,
           pendingBuy: 0, pendingSell: 0, newestBuy: 4009, previousBuy: 4006,
           newestSell: 4004, previousSell: 4001 }
-      : { buys: 2, sells: 3, buyProfit: -2, sellProfit: 10, buyLosers: 0, sellLosers: 0,
+      : { buys: 2, sells: 3, buyAdvance: -2, sellAdvance: 10, buyLosers: 0, sellLosers: 0,
           pendingBuy: 0, pendingSell: 0, newestBuy: 4006, previousBuy: 4009,
           newestSell: 4003, previousSell: 4006 });
     if (direction === 1) { bid = 4006.4; ask = 4006.6; }
@@ -595,9 +676,9 @@ for (const direction of [1, -1]) {
     basket.protectionPrice = direction === 1 ? 4006 : 4003;
     InpMaxLosersBeforeCut = 2;
     Object.assign(live, direction === 1
-      ? { buys: 2, sells: 0, buyProfit: 5, sellProfit: 0, buyLosers: 0, sellLosers: 0,
+      ? { buys: 2, sells: 0, buyAdvance: 5, sellAdvance: 0, buyLosers: 0, sellLosers: 0,
           pendingBuy: 0, pendingSell: 0, newestBuy: 4009, previousBuy: 4006 }
-      : { buys: 0, sells: 2, buyProfit: 0, sellProfit: 5, buyLosers: 0, sellLosers: 0,
+      : { buys: 0, sells: 2, buyAdvance: 0, sellAdvance: 5, buyLosers: 0, sellLosers: 0,
           pendingBuy: 0, pendingSell: 0, newestSell: 4000, previousSell: 4003 });
     if (direction === 1) { bid = 4006.4; ask = 4006.6; }
     else { ask = 4002.6; bid = 4002.4; }
@@ -689,4 +770,162 @@ for (const [name, arrange] of ignoredDealCases) {
   });
 }
 
-console.log(`PASS: ${passed} deterministic exit scenarios using extracted EA functions and mocked broker state`);
+function near(actual, expected) {
+  return Math.abs(actual - expected) < 1e-9;
+}
+
+// Grid at these defaults: same side levels 2..5 = 0.03+0.05+0.07+0.09 = 0.24
+// lot, opposite side levels 1..5 = manual 0.02 + 0.24 = 0.26 lot. At 400 per
+// lot that is 96 and 104 units of margin.
+const MANUAL_LOT = 0.02;
+
+test('level 1 mirrors the manual lot', () => {
+  reset();
+  assert(near(LotForLevel(1, MANUAL_LOT), MANUAL_LOT), 'level 1 did not mirror the manual lot');
+});
+
+test('level 2+ follows the odd multiples of the fixed unit', () => {
+  reset();
+  assert(near(LotForLevel(2, MANUAL_LOT), 0.03) &&
+         near(LotForLevel(3, MANUAL_LOT), 0.05) &&
+         near(LotForLevel(5, MANUAL_LOT), 0.09),
+         'fixed lot progression is not 3,5,...,9 units');
+});
+
+test('a level below the broker minimum costs no margin', () => {
+  reset();
+  assert(LevelMargin(1, 4000, 0.005) === 0, 'an unplaceable level was still budgeted for');
+});
+
+test('a priced level costs volume times the broker rate', () => {
+  reset();
+  assert(near(LevelMargin(1, 4000, 0.05), 20), 'level margin did not follow the broker rate');
+});
+
+test('an uncalculable level reports failure', () => {
+  reset();
+  calcMarginFails = true;
+  assert(LevelMargin(1, 4000, 0.05) < 0, 'a failed margin calculation was not reported');
+});
+
+test('a comfortable account accepts the grid', () => {
+  reset();
+  assert(GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'a well funded grid was rejected');
+});
+
+test('a thin account rejects the grid', () => {
+  reset();
+  equity = 300;   // 300 / 104 = 288% against a 300% floor
+  assert(!GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'an underfunded grid was accepted');
+});
+
+test('the floor is inclusive', () => {
+  reset();
+  equity = 312;   // 312 / 104 = exactly 300%
+  assert(GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'a grid exactly at the floor was rejected');
+});
+
+test('free hedged volume budgets only the dearer side', () => {
+  reset();
+  marginHedged = 0;
+  equity = 500;   // 500 / 104 = 481% one side, 500 / 200 = 250% both
+  assert(GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'hedged netting was not credited');
+});
+
+test('charged hedged volume budgets both sides', () => {
+  reset();
+  marginHedged = 5;
+  equity = 500;
+  assert(!GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'both sides were not summed when hedging costs margin');
+});
+
+test('margin already in use counts against the floor', () => {
+  reset();
+  equity = 500;
+  usedMargin = 100;   // 500 / 204 = 245%
+  assert(!GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'existing exposure was ignored');
+});
+
+test('an uncalculable level rejects the whole grid', () => {
+  reset();
+  calcMarginFails = true;
+  assert(!GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'a grid that cannot be priced was accepted');
+});
+
+test('non-positive equity rejects the grid', () => {
+  reset();
+  equity = 0;
+  assert(!GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'a grid was accepted without readable equity');
+});
+
+test('a zero floor disables the margin guard', () => {
+  reset();
+  InpMinMarginLevelPercent = 0;
+  equity = 1;
+  assert(GridMarginIsAffordable(1, 4000, MANUAL_LOT, 0, 0), 'the disabled guard still rejected a grid');
+});
+
+// Queued grid: entry 4000, window expiring at 10000 on a clock reading 5000.
+test('a queued grid survives inside the window and near the entry', () => {
+  reset();
+  assert(PendingGridStillValid(4000, 1, 10000, 4000.4, 4000.6, 5000),
+         'a retryable grid was abandoned');
+});
+
+test('a queued grid expires with its window', () => {
+  reset();
+  assert(!PendingGridStillValid(4000, 1, 10000, 4000.4, 4000.6, 10000),
+         'the retry window is not inclusive at its end');
+});
+
+test('a queued grid is abandoned once price walks a full grid step', () => {
+  reset();
+  assert(!PendingGridStillValid(4000, 1, 10000, 4002.9, 4003.1, 5000),
+         'a grid was retried after price left the entry it was built around');
+  assert(PendingGridStillValid(4000, 1, 10000, 4002.7, 4002.9, 5000),
+         'a grid still inside one step was abandoned');
+});
+
+test('a queued grid measures drift against its own side', () => {
+  reset();
+  // A Sell entry is chased by Bid, so an Ask that has drifted must not end it.
+  assert(PendingGridStillValid(4000, -1, 10000, 3997.2, 4003.5, 5000),
+         'drift was measured against the wrong side of the quote');
+});
+
+test('a queued grid waits out an unreadable quote', () => {
+  reset();
+  assert(PendingGridStillValid(4000, 1, 10000, 0, 0, 5000),
+         'a missing quote ended the retry instead of the window');
+});
+
+test('an unfiltered manual entry is accepted', () => {
+  reset();
+  assert(ManualEntryAccepted(MANUAL_LOT), 'the default filter rejected a manual entry');
+});
+
+test('a manual entry below the lot filter is ignored', () => {
+  reset();
+  InpMinManualLot = 0.05;
+  assert(!ManualEntryAccepted(MANUAL_LOT), 'an undersized manual entry was gridded');
+});
+
+test('a manual entry above the lot filter is ignored', () => {
+  reset();
+  InpMaxManualLot = 0.01;
+  assert(!ManualEntryAccepted(MANUAL_LOT), 'an oversized manual entry was gridded');
+});
+
+test('the concurrent basket cap blocks a new manual entry', () => {
+  reset();   // reset() leaves exactly one basket running
+  InpMaxConcurrentBaskets = 1;
+  assert(!ManualEntryAccepted(MANUAL_LOT), 'the basket cap did not hold');
+});
+
+test('room under the concurrent cap still accepts', () => {
+  reset();
+  InpMaxConcurrentBaskets = 2;
+  assert(ManualEntryAccepted(MANUAL_LOT), 'the basket cap rejected an entry that fits');
+});
+
+console.log(`PASS: ${passed} deterministic exit and grid-placement scenarios using extracted EA functions and mocked broker state`);

@@ -3,8 +3,13 @@
 //|  Builds a two-sided pending-stop grid from one manual market     |
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
-#property copyright "Custom EA - One Click Stop Grid"
+#property copyright "Custom EA - One Click Stop Grid (BACKTEST HARNESS - not for live use)"
 #property version   "1.39"
+// TEST-ONLY FILE. This is XAUUSD_OneClick_StopGrid_EA.mq5 v1.39 plus one
+// bolted-on block (marked DEBUG HARNESS below) that fires the "manual"
+// market entries the production EA expects a human to place, so the
+// Strategy Tester - which can only ever run one Expert - has something to
+// react to. It is never copied back into the production file.
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -14,6 +19,12 @@ CTrade trade;
 #define MAX_PROCESSED_MANUAL_ORDERS 256
 #define MAX_GRID_LEVELS_PER_SIDE    32
 #define MAX_TRACKED_BASKETS         64
+
+input group "=== DEBUG HARNESS (backtest only) ==="
+input bool     InpDebugAutoEntry       = true;    // Simulate a manual market entry (Magic 0) whenever no basket is running
+input double   InpDebugManualLot       = 0.02;    // Lot size of each simulated manual entry
+input int      InpDebugCooldownBars    = 20;      // Bars to wait after a basket empties before the next simulated entry
+input int      InpDebugDirectionMode   = 0;       // 0 = alternate Buy/Sell, 1 = always Buy, 2 = always Sell
 
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
@@ -80,6 +91,10 @@ struct CloseBasket
    int    retainedProtectionDirection;
   };
 CloseBasket g_closeBaskets[];
+
+// --- DEBUG HARNESS state ---
+datetime g_debugCooldownUntilBar = 0;
+int      g_debugNextDirection = 1;
 
 // A grid rejected for a passing reason - a spread spike, a momentary quote
 // gap, margin briefly tied up - used to be dead for good, because the
@@ -238,6 +253,100 @@ void OnTick()
    PruneClosedBaskets();
    if(InpUseFormulaClose)
       ManageFormulaClose();
+   DebugHarnessMaybeOpenManualEntry();
+  }
+
+//+------------------------------------------------------------------+
+// DEBUG HARNESS ONLY. Places one market order with Magic 0 - exactly what
+// the production EA treats as a manual one-click entry - whenever nothing
+// is currently running and the cooldown has elapsed, so the Strategy
+// Tester exercises the real ProcessManualEntryDeal -> grid -> exit path
+// repeatedly across the test range instead of doing nothing at all.
+void DebugHarnessMaybeOpenManualEntry()
+  {
+   if(!InpDebugAutoEntry)
+      return;
+   if(ArraySize(g_closeBaskets) > 0 || ArraySize(g_pendingGrids) > 0)
+      return;
+
+   // A simulated entry the production EA never adopted (its grid attempt
+   // was abandoned - spread, margin, or a market-closed reject that outran
+   // the retry window) leaves a stray Magic-0 position with nothing
+   // managing it, exactly as an unhedged manual position would in reality.
+   // Left alone it would pin the rest of the test at one static position,
+   // so the harness plays the role of the human noticing and closing it.
+   DebugHarnessCloseStrayPositions();
+
+   if(TimeCurrent() < g_debugCooldownUntilBar)
+      return;
+   if(PositionsTotal() > 0 || OrdersTotal() > 0)
+      return;   // a basket-managed position/order; wait for it to clear
+
+   int direction;
+   if(InpDebugDirectionMode == 1)
+      direction = 1;
+   else if(InpDebugDirectionMode == 2)
+      direction = -1;
+   else
+     {
+      direction = g_debugNextDirection;
+      g_debugNextDirection = -g_debugNextDirection;
+     }
+
+   // Deliberately a plain, unmanaged CTrade call at Magic 0 - the same
+   // footprint a human clicking Buy/Sell in the terminal leaves.
+   CTrade debugTrade;
+   debugTrade.SetExpertMagicNumber(0);
+   debugTrade.SetDeviationInPoints(InpSlippagePoints);
+   debugTrade.SetTypeFillingBySymbol(_Symbol);
+   bool sent = (direction == 1) ? debugTrade.Buy(InpDebugManualLot) : debugTrade.Sell(InpDebugManualLot);
+   if(!sent)
+     {
+      Print("DEBUG HARNESS: simulated manual entry failed | ", debugTrade.ResultRetcodeDescription());
+      return;
+     }
+
+   Print("DEBUG HARNESS: simulated manual ", (direction == 1) ? "Buy" : "Sell",
+         " ", DoubleToString(InpDebugManualLot, 2), " lot to seed the next basket");
+   g_debugCooldownUntilBar = (datetime)((long)TimeCurrent() + (long)InpDebugCooldownBars * PeriodSeconds());
+  }
+
+//+------------------------------------------------------------------+
+// DEBUG HARNESS ONLY. Closes any Magic-0 position no basket is tracking -
+// an abandoned grid attempt, or one left over from a symbol whose trading
+// mode closed mid-retry - so a single unmanaged entry cannot stall every
+// later cycle of the test.
+void DebugHarnessCloseStrayPositions()
+  {
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != 0)
+         continue;
+
+      ulong positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      bool tracked = false;
+      for(int b=0; b<ArraySize(g_closeBaskets); b++)
+         if(g_closeBaskets[b].manualPositionId == positionId)
+           {
+            tracked = true;
+            break;
+           }
+      if(tracked)
+         continue;
+
+      CTrade debugTrade;
+      debugTrade.SetExpertMagicNumber(0);
+      debugTrade.SetDeviationInPoints(InpSlippagePoints);
+      debugTrade.SetTypeFillingBySymbol(_Symbol);
+      if(!debugTrade.PositionClose(ticket, InpSlippagePoints))
+         Print("DEBUG HARNESS: could not close stray position #", ticket,
+               " | ", debugTrade.ResultRetcodeDescription());
+      else
+         Print("DEBUG HARNESS: closed stray unmanaged position #", ticket);
+     }
   }
 
 //+------------------------------------------------------------------+

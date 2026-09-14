@@ -1,8 +1,8 @@
-# XAUUSD One-Click Stop Grid EA v1.36
+# XAUUSD One-Click Stop Grid EA v1.39
 
 ## Scope and defaults
 
-Each newly filled manual entry (Magic 0) on the chart symbol starts an independent basket. Use a hedging account and one EA instance per account/server/symbol/magic scope.
+Each newly filled manual entry (Magic 0) on the chart symbol starts an independent basket, unless the manual entry filter below excludes it. A basket is adopted only once real orders exist to manage it. Use a hedging account and one EA instance per account/server/symbol/magic scope.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -13,9 +13,13 @@ Each newly filled manual entry (Magic 0) on the chart symbol starts an independe
 | Base-line cushion | 0.050 | Used by the initial/pre-cut ladder, not by the fixed recovery SL |
 | Recovery SL milestone distance | 200 price cents = 2.000 | Measured from the intended recovery SL level; trailing is already active before this milestone |
 | Winner cut count | 3 | Winning-side open positions needed while opposite losing positions exist |
-| Pre-SL loser cut | 2 positions and 2.500 adverse | Superseded for the managed side once clean trailing or the fixed recovery SL is active |
+| Pre-SL loser cut | 2 positions and 2.500 adverse | Superseded for the managed side once clean trailing is active, or from the moment a winner cut leaves that side surviving |
 | Maximum opening spread | 0.20 | Reject grid creation above this spread |
 | Pending cap | 100 | Per symbol/magic; reject a new grid if its full pending count does not fit |
+| Minimum margin level | 300% | 0 disables; reject a new grid whose fully filled levels would leave margin level below this |
+| Manual lot filter | 0.0 / 0.0 | Both 0 disables; otherwise only manual entries inside this lot range start a grid |
+| Concurrent basket cap | 0 | 0 is unlimited; otherwise ignore a manual entry while that many baskets already run |
+| Grid retry window | 60s | 0 disables retries; otherwise retry a transiently rejected grid this long, while price stays within one grid step of the entry |
 | Optional per-pending SL/TP | 0.0 / 0.0 | Disabled by default; does not install an initial stop on the manual root position |
 | Formula master switch | true | Enables EA-side basket exits and retries |
 | Recovery safety breaker | true | Exit when a side's losing count cannot satisfy 2k+1 within the level cap |
@@ -32,7 +36,47 @@ Manual Buy at 4000, 0.02 lot:
 | 4 | 4009 Buy Stop | 3988 Sell Stop | 0.07 |
 | 5 | 4012 Buy Stop | 3985 Sell Stop | 0.09 |
 
-A manual Sell mirrors the layout. Grid placement is not transactional: a rejected individual request can leave a partial grid, and rejected levels are not automatically recreated. A spread/cap rejection leaves the manual position open. Pending expiration is GTC by default.
+A manual Sell mirrors the layout. Grid placement is not transactional: a rejected individual request can leave a partial grid, and rejected levels are not automatically recreated. Pending expiration is GTC by default.
+
+### Adoption and the retry window
+
+A manual position the EA has claimed but placed nothing around is worse than an unclaimed one: no exit rule acts on a lone position, so the claim only hides it from the user. The basket is therefore adopted **after** the grid is placed, and a manual entry that produced no orders stays entirely the user's.
+
+Marking the deal as seen is likewise separate from having built anything. A grid refused for a passing condition - no readable quote, a spread spike, margin briefly tied up, the pending cap momentarily full, or a broker that accepted no level - is queued and retried on later ticks. The queue drops a request when:
+
+- the retry window runs out (default 60 seconds, measured from the first attempt);
+- price leaves one grid step of the manual entry, since beyond that the levels would sit behind the market and be refused one at a time, producing a broken grid rather than a late one - drift is measured on the side that would chase the entry, Ask for a Buy and Bid for a Sell;
+- the manual position it would hedge is closed.
+
+Refusals that retrying cannot help - no position id, a broker that rewrites order comments, or basket capacity - abandon immediately, withdrawing any orders already placed. The queue lives in memory only: a restart discards it, exactly as a restart today leaves an ungridded manual entry alone.
+
+### Pre-trade margin guard
+
+Nothing downstream ever declines to add a position, so affordability is decided once, before the first pending exists. Grid creation is rejected unless the account could still carry the grid with **every** level filled:
+
+1. Sum `OrderCalcMargin` over the levels each side would open - the same side's levels 2..N, the opposite side's levels 1..N - at their own entry prices and lots. Levels whose lot the broker would reject cost nothing and are skipped; a failed calculation rejects the grid.
+2. Take the larger of the two sides when `SYMBOL_MARGIN_HEDGED` is 0, since hedged volume then costs nothing and the sides never both charge margin at once. Otherwise add both sides.
+3. Reject when `equity / (current used margin + grid margin) * 100` falls below the configured floor.
+
+The manual position is already funded and is therefore not counted again. A refusal here is transient, so the grid joins the retry queue rather than dying. Setting the floor to 0 disables the guard and restores the previous behaviour of ignoring account margin entirely.
+
+### Manual entry filter
+
+The EA cannot tell a deliberate one-click entry from any other manual trade on the symbol, so the user draws that line with three filters, all shipped disabled:
+
+- **Minimum manual lot** and **maximum manual lot** - a manual entry outside the range is left entirely to the user.
+- **Concurrent basket cap** - a manual entry arriving while that many baskets already run is left to the user.
+
+A filtered entry is rejected before any order is placed, so it never enters basket state and is never queued for retry.
+
+### Basket tag verification
+
+Ownership, restart discovery, and attributing a broker SL/TP exit all run through the `G#<root ticket>` order comment, so a broker that rewrites or truncates comments blinds the EA rather than degrading it. After placing a grid the EA reads the tag back off the orders the broker accepted. If any tag differs:
+
+1. Withdraw every order just placed, by the tickets returned at placement time.
+2. Alert, and refuse to create any further grid until the EA is restarted.
+
+Orders that cannot be selected yet are not treated as proof of a stripped tag.
 
 ## Mode 1: clean winning streak
 
@@ -58,7 +102,7 @@ The previous 2.500 loser-cut rule is skipped for the clean direction once this m
 
 ## Mode 2: winner cut, approach trailing, and recovery SL milestone
 
-Before winner cut, the winning direction is selected by positive aggregate position profit plus swap (if both sides are positive, choose the larger). The count on the winning side is its open-position count, not the number of individually profitable positions.
+Before winner cut, the winning direction is selected by positive aggregate **price advance** - each position's favourable price distance from its own entry, weighted by its lot - and if both sides are positive, the larger one wins. A position counts as losing when its own price advance is negative. Neither figure includes swap or commission: financing cost would otherwise turn a flat position into a loser after a few nights and both mis-select the winning side and trip the safety breaker on carry rather than on price. Logged net figures still report real money (profit plus swap). The count on the winning side is its open-position count, not the number of individually profitable positions.
 
 Winner cut starts when that side has at least three positions and the opposite side has at least one losing position, unless a higher-priority exit has already triggered. It records:
 
@@ -91,7 +135,7 @@ With anchor 4006 and grid step 3.000:
 
 Later fills do not move the saved cut anchor, milestone, or budget target, though they may tighten the actual trailing line. Budget is checked before trailing and the milestone, so a quote that jumps directly past the target starts a full exit immediately.
 
-Before the recovery SL is armed, the existing loser cut remains active. After arming, loser cut is skipped only for the surviving direction; the cut side is still checked if a failed close left positions behind. This prevents new survivor fills from moving the old loser-cut anchor ahead of the requested fixed SL. Other existing stops and safety exits can still close earlier; the target is not a guaranteed fill or a promise of net profit after banked losses and costs.
+The loser cut is skipped for the surviving direction from the moment of the cut, not from the later recovery-SL arming. The cut distance is below one grid step by configuration, while the survivor's ladder line sits a full step back, so a live loser cut on that side always fired first - and closing the survivor closes the recovery the cut was paid for. The cut side is still checked, so a failed close that left positions behind is not ignored. Other existing stops and safety exits can still close earlier; the target is not a guaranteed fill or a promise of net profit after banked losses and costs.
 
 ## Shared exits and priority
 
@@ -127,9 +171,14 @@ A broker SL/TP exit at the formula line is handled in OnTradeTransaction even if
 | Incomplete cut state | Cannot restore that budget; terminal discovery does not reconstruct the historical cut decision |
 | Formula master false | EA-side decisions/retries stop; already-installed broker SL/TP remain; grid entry handling is separate |
 | Terminal offline | EA-side trailing, cancellation and market exits do not run; accepted broker stops remain |
+| Tick feed stalled | A one-second timer retries settled basket exits and stuck winner-cut side closes, and refreshes their failsafe stops; no trailing, cut, or breaker decision is taken off the timer, since those need a fresh quote |
+| Broker rewrites order comments | Withdraw the orders just placed, alert, and create no further grid until restart |
+| Transient grid refusal | Queue the request and retry on later ticks until the window closes, price leaves one grid step of the entry, or the manual position is closed |
 | Manual partial close | Remaining positions are still managed; no automatic full exit solely for a manual partial close |
 
-State version 6 stores clean retirement as field C, recovery SL arming as field J, and the retained pre-recovery line/direction as fields Y/Z. Every actual line change and mode decision is persisted; unchanged trailing candidates do not flush state repeatedly. Persistence uses terminal Global Variables and does not transfer to another terminal automatically.
+State version 6 stores clean retirement as field C, recovery SL arming as field J, and the retained pre-recovery line/direction as fields Y/Z. Every actual line change and mode decision is written. Flushing those writes to disk is throttled: latched decisions - market exit, both cuts, clean retirement, recovery SL arming, and the first arming of a protection line - flush immediately, while a routine trailing step flushes at most once a second, because it repeats on nearly every tick of a trend. An unclean shutdown can therefore lose up to one second of line movement, which would leave a broker SL/TP exit at the newer line unattributed. Persistence uses terminal Global Variables and does not transfer to another terminal automatically.
+
+The basket exit line is also installed as a take profit on the hedge side, and that take profit is only ever moved nearer the market, so an optional per-pending TP is never pushed further away by the basket line.
 
 No equity-percentage or daily-loss limit exists. Stops and targets are price thresholds, not guaranteed fill prices or monetary profit guarantees. Multiple baskets add exposure. Use demo validation for actual execution behavior.
 
