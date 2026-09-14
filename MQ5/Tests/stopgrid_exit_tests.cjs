@@ -163,6 +163,8 @@ let pendingDeletes;
 let sideCloseSucceeds;
 let basketCloseSucceeds;
 let pendingDeleteSucceeds;
+let sidePendingDeletes;
+let sidePendingDeleteSucceeds;
 
 function newBasket() {
   return {
@@ -237,6 +239,8 @@ function reset(direction = 1) {
   sideCloseSucceeds = false;
   basketCloseSucceeds = false;
   pendingDeleteSucceeds = true;
+  sidePendingDeletes = 0;
+  sidePendingDeleteSucceeds = true;
 }
 
 function Print() {}
@@ -275,6 +279,12 @@ function BasketHasOpenState() {
 function DeleteBasketPendingOrders() {
   pendingDeletes += 1;
   if (pendingDeleteSucceeds) { live.pendingBuy = 0; live.pendingSell = 0; }
+}
+function DeleteSidePendingOrders(_basket, direction) {
+  sidePendingDeletes += 1;
+  if (!sidePendingDeleteSucceeds) return;
+  if (direction === 1) live.pendingBuy = 0;
+  else live.pendingSell = 0;
 }
 function CloseBasketAtMarket() {
   basketCloses += 1;
@@ -437,6 +447,33 @@ for (const direction of [1, -1]) {
     assert(applies === 1 && statsReads === 2, 'exact recovery threshold skipped same-tick protection');
     assert(g_closeBaskets[0].recoverySLArmed, 'recovery SL was not armed');
     assert(direction === 1 ? live.sells === 0 : live.buys === 0, 'cut side survived successful close');
+  });
+
+  test(`winner cut retires the winning side's own remaining pendings direction ${direction}`, () => {
+    reset(direction);
+    sideCloseSucceeds = true;
+    if (direction === 1) { bid = 4008; ask = 4008.2; }
+    else { bid = 4006.8; ask = 4007; }
+    ManageFormulaClose();
+    assert(sidePendingDeletes === 1, 'the winning side\'s own pendings were not retired at cut time');
+    assert(direction === 1 ? live.pendingBuy === 0 : live.pendingSell === 0,
+      'a winning-side pending survived the cut, free to race the eventual budget exit');
+  });
+
+  test(`a failed winning-side pending delete is retried alongside the cut-side retry, direction ${direction}`, () => {
+    reset(direction);
+    sideCloseSucceeds = false;
+    sidePendingDeleteSucceeds = false;
+    if (direction === 1) { bid = 4008; ask = 4008.2; }
+    else { bid = 4006.8; ask = 4007; }
+    ManageFormulaClose();
+    assert(sidePendingDeletes === 1 && (direction === 1 ? live.pendingBuy > 0 : live.pendingSell > 0),
+      'first attempt state is wrong for this test to mean anything');
+    sidePendingDeleteSucceeds = true;
+    ManageFormulaClose();
+    assert(sidePendingDeletes === 2, 'the retry tick did not attempt the winning-side pending delete again');
+    assert(direction === 1 ? live.pendingBuy === 0 : live.pendingSell === 0,
+      'the retried delete did not clear the winning side\'s pendings');
   });
 
   test(`actual trailing ratchet is persisted direction ${direction}`, () => {

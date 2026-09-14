@@ -1,4 +1,4 @@
-# XAUUSD One-Click Stop Grid EA v1.42
+# XAUUSD One-Click Stop Grid EA v1.43
 
 ## Scope and defaults
 
@@ -115,7 +115,7 @@ Winner cut starts when that side has at least three positions and the opposite s
 - anchor: the newest winning-side position's entry at cut time;
 - direction: the surviving side.
 
-It persists the decision before attempting to close every position and pending order on the opposite side. The surviving side's pending orders remain until another exit deletes them. Failed side closes are retried; budget and protection continue in the same tick.
+It persists the decision before attempting to close every position and pending order on the opposite side, **and deletes the surviving side's own remaining pending orders in the same tick** (as of v1.43 - before, they stayed live until some later exit deleted them, which meant a fill landing on the exact tick that later exit fired raced its own pending cleanup: the broker's fill and the EA's delete could arrive in either order, so that level either opened a position closed again within moments, or was simply cancelled outright without ever opening - "reaches the stop and just cancels" is that race lost). WINNER CUT BUDGET's exit target is fixed relative to the cut anchor the moment the cut fires, so a level filling afterward was never going to matter for long anyway. A failed winning-side pending delete is retried alongside the cut-side retry below. Failed side closes are retried; budget and protection continue in the same tick.
 
 Management of the survivor - trailing, the recovery SL milestone, the post-cut grace floor below - stays dormant until the cut side is confirmed fully clear (no open position, no pending order), so nothing treats a hedge that has not really been removed yet as gone.
 
@@ -177,6 +177,7 @@ A broker SL/TP exit at the formula line is handled in OnTradeTransaction even if
 | --- | --- |
 | Failed close or pending deletion during full exit | Retry while the basket still has state; price rebound does not cancel the decision; a failsafe stop refreshes any positions still open toward current price on every retry |
 | Failed losing-side close | Retry the saved cut side while continuing budget/protection; a failsafe stop guards that side alone until the retry succeeds |
+| Failed winning-side pending delete at cut time | Retried on the same tick as the cut-side retry, until it succeeds |
 | Failed SL modification | Keep the intended line and retry; an armed state does not prove the broker accepted every modification |
 | No positions left | Delete leftover pending orders; prune the basket when fully empty |
 | Restart with complete saved state | Restore the basket, line, market-exit latch, cut data, clean-retirement flag, and recovery-SL flag |

@@ -4,7 +4,7 @@
 //|  entry. Portfolio-close rules are managed separately.            |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - One Click Stop Grid (BACKTEST HARNESS - not for live use)"
-#property version   "1.41"
+#property version   "1.43"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -38,6 +38,7 @@ input int      InpRecoverySLArmCents    = 130;     // Arm the fixed recovery SL 
 input int      InpPostCutGraceCents     = 0;       // 0 = disabled; otherwise widen the survivor's protection floor to (grid step + this) behind the cut anchor, set once right after WINNER CUT clears its losing side
 input double   InpProtectSpreadBuffer   = 0.050;   // Fixed cushion added to every trailing SL step, in price units
 input int      InpWinnerCutCount        = 3;       // WINNER CUT: 0 = disabled; otherwise close the losing side (positions + pendings) once the winning side reaches this many positions
+input int      InpCleanTrailMinPositions = 3;      // Mode 1 (clean trail): winning-side position count needed, with the opposite side still empty, before all remaining pendings are cancelled and the basket switches to pure trailing
 input int      InpMaxLosersBeforeCut    = 2;       // LOSER CUT: 0 = disabled; otherwise close everything once one side holds this many POSITIONS (P/L ignored) and the newest is passed by the distance below
 input int      InpLoserCutMoveCents     = 165;     // LOSER CUT adverse move against the newest entry on that side, in price cents; 165 = 1.650
 
@@ -134,6 +135,7 @@ int OnInit()
       InpPostCutGraceCents < 0 ||
       InpProtectSpreadBuffer < 0.0 ||
       InpWinnerCutCount < 0 ||
+      InpCleanTrailMinPositions < 2 || InpCleanTrailMinPositions > InpOrdersPerSide ||
       InpMaxLosersBeforeCut < 0 ||
       (InpMaxLosersBeforeCut > 0 && InpLoserCutMoveCents <= 0) ||
       InpExpirationHours < 0)
@@ -198,6 +200,9 @@ int OnInit()
          " past the newest entry, move the line to that entry + ",
          DoubleToString(InpProtectSpreadBuffer, _Digits),
          "; clean baskets retire all pending orders and then trail price by this distance");
+   Print("OneClickGrid: CLEAN TRAIL = once the winning side reaches ", InpCleanTrailMinPositions,
+         " positions with the opposite side still empty, cancel every remaining pending order ",
+         "on both sides and switch to pure trailing - any levels beyond that count never get the chance to fill");
    Print("OneClickGrid: recovery SL = cut anchor + direction * (k-1) grid steps; ",
          "the survivor trails on the ordinary ladder alone until price reaches that level, ",
          "then price-following joins in; arm after price passes SL by ",
@@ -1818,15 +1823,21 @@ void CloseBasketAtMarket(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
-// Closes only one side of a basket - its pending orders and its open
-// positions - leaving the other side (and its own pendings) untouched.
-// Used by WINNER CUT to bank the losing side while the winner keeps running.
-void CloseSideAtMarket(const CloseBasket &basket, const int direction)
+// Deletes only one side's pending orders, leaving its open positions (and
+// the other side entirely) untouched. Used both by CloseSideAtMarket (the
+// losing side, immediately before closing its positions) and, on its own,
+// to retire the WINNING side's own remaining pendings the moment WINNER
+// CUT fires - otherwise those pendings stay live until the eventual
+// WINNER CUT BUDGET/LOSER CUT exit, and a fill landing on the very tick
+// that exit fires races DeleteBasketPendingOrders there: whichever the
+// broker processes first decides whether that level opens a real position
+// (closed moments later for little benefit) or the pending is simply
+// cancelled - "reaches the stop and just cancels, never opens" is exactly
+// that race lost. Retiring the winner's own pendings at cut time removes
+// the race instead of resolving it differently.
+void DeleteSidePendingOrders(const CloseBasket &basket, const int direction)
   {
    bool wantBuy = (direction == 1);
-
-   // Pending orders go first so a fill cannot re-enter this side between
-   // the individual position closes.
    for(int i=OrdersTotal()-1; i>=0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -1844,6 +1855,19 @@ void CloseSideAtMarket(const CloseBasket &basket, const int direction)
       if(!trade.OrderDelete(ticket) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
          Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription());
      }
+  }
+
+//+------------------------------------------------------------------+
+// Closes only one side of a basket - its pending orders and its open
+// positions - leaving the other side (and its own pendings) untouched.
+// Used by WINNER CUT to bank the losing side while the winner keeps running.
+void CloseSideAtMarket(const CloseBasket &basket, const int direction)
+  {
+   bool wantBuy = (direction == 1);
+
+   // Pending orders go first so a fill cannot re-enter this side between
+   // the individual position closes.
+   DeleteSidePendingOrders(basket, direction);
 
    ENUM_POSITION_TYPE posType = wantBuy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    for(int i=PositionsTotal()-1; i>=0; i--)
@@ -2367,6 +2391,10 @@ void ManageFormulaClose()
          Print("OneClickGrid: WINNER CUT retry #", g_closeBaskets[b].rootOrderTicket,
                " | the cut side still holds orders or positions; closing it again",
                " | direction=", -winningDirection);
+         // A failed pending delete on the winning side at cut time (broker
+         // rejection, disconnect) is retried here too, alongside the cut
+         // side, rather than left to fill and race the eventual budget exit.
+         DeleteSidePendingOrders(g_closeBaskets[b], winningDirection);
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
          GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyAdvance, sellAdvance, netProfit,
                         buyLosingCount, sellLosingCount);
@@ -2411,6 +2439,14 @@ void ManageFormulaClose()
          g_closeBaskets[b].winnerCutAnchorPrice = cutAnchorEntry;
          g_closeBaskets[b].winnerCutDirection = winningDirection;
          SavePersistentState();
+         // The winning side's own unfilled levels stop mattering the moment
+         // the cut is decided: WINNER CUT BUDGET's exit target is already
+         // fixed relative to the anchor above, so a new fill from here on
+         // only adds a position that budget will very likely close again
+         // within moments - or, if that exit and the fill land on the same
+         // tick, races DeleteBasketPendingOrders there and can be cancelled
+         // instead of filled. Retiring them now removes both outcomes.
+         DeleteSidePendingOrders(g_closeBaskets[b], winningDirection);
          CloseSideAtMarket(g_closeBaskets[b], -winningDirection);
          GetBasketStats(g_closeBaskets[b], buyCount, sellCount, buyAdvance, sellAdvance, netProfit,
                         buyLosingCount, sellLosingCount);
@@ -2469,7 +2505,7 @@ void ManageFormulaClose()
         {
          UpdateTrailingProtection(g_closeBaskets[b], winningDirection);
          int oppositeCount = (winningDirection == 1) ? sellCount : buyCount;
-         if(!g_closeBaskets[b].cleanTrailActive && oppositeCount == 0 && winnerCount >= 2 &&
+         if(!g_closeBaskets[b].cleanTrailActive && oppositeCount == 0 && winnerCount >= InpCleanTrailMinPositions &&
             g_closeBaskets[b].protectionArmed)
            {
             g_closeBaskets[b].cleanTrailActive = true;
