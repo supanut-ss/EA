@@ -53,7 +53,7 @@ input bool     InpDebugAutoEntry       = true;    // Simulate a manual market en
 input double   InpDebugManualLot       = 0.02;    // Lot size of each simulated manual entry
 input int      InpDebugCooldownBars    = 20;      // Bars to wait after a basket empties before the next simulated entry
 input int      InpDebugDirectionMode   = 0;       // 0 = alternate Buy/Sell, 1 = always Buy, 2 = always Sell
-input ulong    InpDebugManualMagic     = 0;       // Magic Number the simulated entry uses - set to InpFollowMagicNumber to test the follow-magic path instead of true manual (0)
+input int      InpDebugStuckHours      = 72;      // If anything stays open this long (e.g. a "market closed" retry loop across a weekend), force-clear everything so the test keeps moving. 0 = disabled
 
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
@@ -117,10 +117,15 @@ struct CloseBasket
    bool   rule30Applied;   // Rule B's 3-0 pending-cancellation has already run once for this basket
    bool   rule30SlArmed;   // Rule B's 3-0 SL-to-level3 move has already fired once for this basket
    bool   rule31Applied;   // Rule B's 3-1 losing-side pending-cancellation has already run once for this basket
-   bool   rule32Armed;     // Rule B's 3-2 SL-to-level2 move has already fired once for this basket
    bool   rule32Applied;   // Rule B's 3-2 losing-side pending-cancellation has already run once for this basket
    bool   rule31Level4Failsafe;   // Rule B's 3-1 level-4 overflow failsafe has already fired once for this basket
    bool   rule32Level5Failsafe;   // Rule B's 3-2 level-5 overflow failsafe has already fired once for this basket
+   bool   rule31Level4TpSet;      // Rule B's 3-1 level-4 pending TP has already been set once for this basket
+   bool   rule31Level4SlArmed;    // Rule B's 3-1 level-4 SL-to-level2 tightening has already fired once for this basket
+   bool   rule32Level4TpSet;      // Rule B's 3-2 level-4 pending TP has already been set once for this basket
+   bool   rule32Level5TpSet;      // Rule B's 3-2 level-5 pending TP has already been set once for this basket
+   bool   rule32Level4SlArmed;    // Rule B's 3-2 level-4 SL-to-level2+buffer tightening has already fired once for this basket
+   bool   rule32Level5SlArmed;    // Rule B's 3-2 level-5 SL-to-level3+buffer tightening has already fired once for this basket
   };
 CloseBasket g_closeBaskets[];
 
@@ -149,6 +154,7 @@ PendingGrid g_pendingGrids[];
 // --- DEBUG HARNESS state ---
 datetime g_debugCooldownUntilBar = 0;
 int      g_debugNextDirection = 1;
+datetime g_debugStuckSinceTime = 0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -259,6 +265,9 @@ void DebugHarnessMaybeOpenManualEntry()
   {
    if(!InpDebugAutoEntry)
       return;
+
+   DebugHarnessCheckStuck();
+
    if(ArraySize(g_closeBaskets) > 0 || ArraySize(g_pendingGrids) > 0)
       return;
 
@@ -284,11 +293,10 @@ void DebugHarnessMaybeOpenManualEntry()
       g_debugNextDirection = -g_debugNextDirection;
      }
 
-   // Deliberately a plain, unmanaged CTrade call - the same footprint a
-   // human clicking Buy/Sell (Magic 0) or another EA (InpDebugManualMagic
-   // set to a non-zero value) leaves.
+   // Deliberately a plain, unmanaged CTrade call at Magic 0 - the same
+   // footprint a human clicking Buy/Sell in the terminal leaves.
    CTrade debugTrade;
-   debugTrade.SetExpertMagicNumber(InpDebugManualMagic);
+   debugTrade.SetExpertMagicNumber(0);
    debugTrade.SetDeviationInPoints(InpSlippagePoints);
    debugTrade.SetTypeFillingBySymbol(_Symbol);
    bool sent = (direction == 1) ? debugTrade.Buy(InpDebugManualLot) : debugTrade.Sell(InpDebugManualLot);
@@ -304,6 +312,67 @@ void DebugHarnessMaybeOpenManualEntry()
   }
 
 //+------------------------------------------------------------------+
+// DEBUG HARNESS ONLY. A "market closed" retry loop (e.g. a close attempted
+// right as a weekend starts) can leave a position genuinely open for real
+// hours of simulated time, and the production EA is designed to just keep
+// retrying it forever - correct for live trading, but it silently starves
+// this harness of any further test coverage for the rest of the run since
+// DebugHarnessMaybeOpenManualEntry waits for everything to clear first. If
+// anything stays open past InpDebugStuckHours, force-clear it all (any
+// magic, positions and pendings alike) and drop every basket/grid this
+// harness was tracking, so later scenarios still get exercised.
+void DebugHarnessCheckStuck()
+  {
+   if(InpDebugStuckHours <= 0)
+      return;
+
+   bool anythingOpen = (PositionsTotal() > 0 || OrdersTotal() > 0 ||
+                        ArraySize(g_closeBaskets) > 0 || ArraySize(g_pendingGrids) > 0);
+   if(!anythingOpen)
+     {
+      g_debugStuckSinceTime = 0;
+      return;
+     }
+   if(g_debugStuckSinceTime == 0)
+     {
+      g_debugStuckSinceTime = TimeCurrent();
+      return;
+     }
+   if((long)TimeCurrent() - (long)g_debugStuckSinceTime < (long)InpDebugStuckHours * 3600)
+      return;
+
+   Print("DEBUG HARNESS: stuck for over ", InpDebugStuckHours,
+         " hours - force-clearing every open position and pending order to keep the test moving");
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      CTrade debugTrade;
+      debugTrade.SetExpertMagicNumber((ulong)PositionGetInteger(POSITION_MAGIC));
+      debugTrade.SetDeviationInPoints(InpSlippagePoints);
+      debugTrade.SetTypeFillingBySymbol(_Symbol);
+      if(!debugTrade.PositionClose(ticket, InpSlippagePoints))
+         Print("DEBUG HARNESS: stuck-clear could not close position #", ticket,
+               " | ", debugTrade.ResultRetcodeDescription());
+     }
+   for(int i=OrdersTotal()-1; i>=0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+      CTrade debugTrade;
+      debugTrade.SetExpertMagicNumber((ulong)OrderGetInteger(ORDER_MAGIC));
+      if(!debugTrade.OrderDelete(ticket))
+         Print("DEBUG HARNESS: stuck-clear could not delete pending #", ticket,
+               " | ", debugTrade.ResultRetcodeDescription());
+     }
+   ArrayResize(g_closeBaskets, 0);
+   ArrayResize(g_pendingGrids, 0);
+   g_debugStuckSinceTime = 0;
+  }
+
+//+------------------------------------------------------------------+
 // DEBUG HARNESS ONLY. Closes any Magic-0 position no basket is tracking -
 // an abandoned grid attempt - so a single unmanaged entry cannot stall
 // every later cycle of the test.
@@ -314,7 +383,7 @@ void DebugHarnessCloseStrayPositions()
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpDebugManualMagic)
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != 0)
          continue;
 
       ulong positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -329,7 +398,7 @@ void DebugHarnessCloseStrayPositions()
          continue;
 
       CTrade debugTrade;
-      debugTrade.SetExpertMagicNumber(InpDebugManualMagic);
+      debugTrade.SetExpertMagicNumber(0);
       debugTrade.SetDeviationInPoints(InpSlippagePoints);
       debugTrade.SetTypeFillingBySymbol(_Symbol);
       if(!debugTrade.PositionClose(ticket, InpSlippagePoints))
@@ -1092,10 +1161,15 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].rule30Applied = false;
    g_closeBaskets[size].rule30SlArmed = false;
    g_closeBaskets[size].rule31Applied = false;
-   g_closeBaskets[size].rule32Armed = false;
    g_closeBaskets[size].rule32Applied = false;
    g_closeBaskets[size].rule31Level4Failsafe = false;
    g_closeBaskets[size].rule32Level5Failsafe = false;
+   g_closeBaskets[size].rule31Level4TpSet = false;
+   g_closeBaskets[size].rule31Level4SlArmed = false;
+   g_closeBaskets[size].rule32Level4TpSet = false;
+   g_closeBaskets[size].rule32Level5TpSet = false;
+   g_closeBaskets[size].rule32Level4SlArmed = false;
+   g_closeBaskets[size].rule32Level5SlArmed = false;
    return(true);
   }
 
@@ -1297,10 +1371,14 @@ void DeleteSidePendingOrders(const CloseBasket &basket, const int direction)
 //+------------------------------------------------------------------+
 // Cancels one specific level's own pending order on one side, if it is
 // still live - leaves every other pending, on either side, untouched.
-void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, const int level)
+// Returns true only once nothing matching is left live - a failed delete
+// (requote, market closed) leaves a matching order behind and reports
+// false, so the caller knows to retry rather than treat this as done.
+bool DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, const int level)
   {
    double levelPrice = LevelPrice(basket, direction, level);
    double tolerance = GridStepPrice() / 2.0;
+   bool allClear = true;
    for(int i=OrdersTotal()-1; i>=0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -1318,8 +1396,61 @@ void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, 
          continue;
 
       if(!trade.OrderDelete(ticket) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
-         Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription());
+        {
+         Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
+         allClear = false;
+        }
      }
+   return(allClear);
+  }
+
+//+------------------------------------------------------------------+
+// Sets a Take Profit on one specific level's own pending order, so it is
+// already covered from the instant it fills - level 4 in case 3-1 is the
+// grid's own overflow level, otherwise left with no TP at all until it
+// fills into a fully unprotected position.
+bool SetPendingTakeProfitAtLevel(const CloseBasket &basket, const int direction, const int level, const double tpPrice)
+  {
+   double levelPrice = LevelPrice(basket, direction, level);
+   double tolerance = GridStepPrice() / 2.0;
+   double normTp = NormalizePriceForDirection(tpPrice, direction);
+   bool allSet = true;
+   for(int i=OrdersTotal()-1; i>=0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderBelongsToBasket(basket))
+         continue;
+
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool isBuySide = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_STOP_LIMIT);
+      bool isSellSide = (type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_STOP_LIMIT);
+      if(direction == 1 && !isBuySide)
+         continue;
+      if(direction == -1 && !isSellSide)
+         continue;
+      if(MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - levelPrice) > tolerance)
+         continue;
+
+      double curTp = OrderGetDouble(ORDER_TP);
+      if(MathAbs(curTp - normTp) < g_tickSize / 2.0)
+         continue;
+
+      double price = OrderGetDouble(ORDER_PRICE_OPEN);
+      double sl = OrderGetDouble(ORDER_SL);
+      ENUM_ORDER_TYPE_TIME typeTime = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
+      datetime expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+
+      if(!trade.OrderModify(ticket, price, sl, normTp, typeTime, expiration))
+        {
+         Print("OneClickGrid: pending TP set failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
+         allSet = false;
+        }
+      else
+         Print("OneClickGrid: RULE B set pending #", ticket, " -> TP=", DoubleToString(normTp, _Digits));
+     }
+   return(allSet);
   }
 
 //+------------------------------------------------------------------+
@@ -1332,6 +1463,10 @@ void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, 
 // tighter distance) should already have closed the official 3 winners, so
 // in practice this only ever touches the extra, unprotected overflow
 // fill(s). Returns true once the threshold is reached and acted on.
+// Returns true only once the level is genuinely clear (no matching pending,
+// no matching position) - a failed close/cancel returns false so the
+// caller retries on the next tick instead of marking this permanently
+// done while the position is still actually live.
 bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const int level, const double extraCents)
   {
    double levelPrice = LevelPrice(basket, direction, level);
@@ -1342,8 +1477,9 @@ bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const 
    if(!reached)
       return(false);
 
-   DeleteBasketPendingAtLevel(basket, direction, level);
+   bool pendingClear = DeleteBasketPendingAtLevel(basket, direction, level);
 
+   bool positionsClear = true;
    ENUM_POSITION_TYPE posType = (direction == 1) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -1353,21 +1489,28 @@ bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const 
       if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != posType)
          continue;
       if(!trade.PositionClose(ticket, InpSlippagePoints) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
-         Print("OneClickGrid: RULE B failsafe close failed #", ticket, " | ", trade.ResultRetcodeDescription());
+        {
+         Print("OneClickGrid: RULE B failsafe close failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
+         positionsClear = false;
+        }
      }
-   return(true);
+   return(pendingClear && positionsClear);
   }
 
 //+------------------------------------------------------------------+
-// Rule A. Independent of Rule B and checked first, on EACH side separately
-// (a side's own price-based loss has nothing to do with which side holds
-// more fills): once a side has InpLoserCutSideCount filled positions AND
-// its boundary entry - the level that is underwater exactly when that many
-// of its positions are simultaneously underwater - has run InpLoserCutMoveCents
-// against it, the whole basket - both sides, positions and pendings alike -
-// closes at market. A failed close/delete is simply retried on the next
-// tick, since the basket is not removed from tracking until
-// PruneClosedBaskets finds it genuinely empty.
+// Rule A. The safety net for whatever Rule B does not cover at all - once
+// Rule B has locked a basket into 3-0/3-1/3-2, its own bracket manages the
+// exit from there and ManageExitRules stops calling this for that basket.
+// Checked on EACH side separately (a side's own price-based loss has
+// nothing to do with which side holds more fills): once a side has
+// InpLoserCutSideCount filled positions AND its boundary entry - the level
+// that is underwater exactly when that many of its positions are
+// simultaneously underwater - has run InpLoserCutMoveCents against it, the
+// whole basket - both sides, positions and pendings alike - closes at
+// market. A failed close/delete is simply retried on the next tick, since
+// the basket is not removed from tracking until PruneClosedBaskets finds
+// it genuinely empty.
 bool CheckAndApplyLoserCut(const CloseBasket &basket)
   {
    if(InpLoserCutSideCount <= 0)
@@ -1478,12 +1621,92 @@ void ApplyRuleB(CloseBasket &basket)
    if(buyCount > 0 || sellCount > 0)
      {
       int liveWinDirection = (buyCount >= sellCount) ? 1 : -1;
+      if(basket.rule31Applied && !basket.rule31Level4TpSet)
+        {
+         double level4Tp = LevelPrice(basket, liveWinDirection, 4) + liveWinDirection * (InpTpBufferCents / 100.0);
+         if(SetPendingTakeProfitAtLevel(basket, liveWinDirection, 4, level4Tp))
+           {
+            basket.rule31Level4TpSet = true;
+            SavePersistentState();
+           }
+        }
+      // Once level 4 has actually filled (a genuine 4th winning position,
+      // not just its pending still waiting), tighten every winning position's
+      // SL to level 2 to lock in more of the extra distance covered - armed
+      // once, held forever, same convention as 3-0's and 3-2's own SL arms.
+      // The losing side's cross-wired mirror moves with it, so both sides
+      // still close together at whichever line is touched first.
+      if(basket.rule31Applied && !basket.rule31Level4SlArmed &&
+         CountSidePositions(basket, liveWinDirection) >= 4)
+        {
+         double armedSl = LevelPrice(basket, liveWinDirection, 2);
+         double level4Tp = LevelPrice(basket, liveWinDirection, 4) + liveWinDirection * (InpTpBufferCents / 100.0);
+         ApplySideSLTP(basket, liveWinDirection, armedSl, level4Tp);
+         if(CountSidePositions(basket, -liveWinDirection) > 0)
+            ApplySideSLTP(basket, -liveWinDirection, level4Tp, armedSl);
+         Print("OneClickGrid: RULE B 3-1 level-4 filled #", basket.rootOrderTicket,
+               " | tightening SL to level 2 for every winning position");
+         basket.rule31Level4SlArmed = true;
+         SavePersistentState();
+        }
       if(basket.rule31Applied && !basket.rule31Level4Failsafe &&
          EnforceLevelFailsafe(basket, liveWinDirection, 4, InpRule31Level4CloseCents / 100.0))
         {
          Print("OneClickGrid: RULE B 3-1 level-4 failsafe #", basket.rootOrderTicket,
                " | price ran ", InpRule31Level4CloseCents, " cents past level 4 - forcing it closed with the rest");
          basket.rule31Level4Failsafe = true;
+         SavePersistentState();
+        }
+      // 3-2 pre-sets level 4's AND level 5's own pending TP to match the
+      // official winning TP, so either is covered from the instant it
+      // fills, same reasoning as 3-1's level 4.
+      if(basket.rule32Applied && !basket.rule32Level4TpSet)
+        {
+         double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
+         if(SetPendingTakeProfitAtLevel(basket, liveWinDirection, 4, level5Tp))
+           {
+            basket.rule32Level4TpSet = true;
+            SavePersistentState();
+           }
+        }
+      if(basket.rule32Applied && !basket.rule32Level5TpSet)
+        {
+         double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
+         if(SetPendingTakeProfitAtLevel(basket, liveWinDirection, 5, level5Tp))
+           {
+            basket.rule32Level5TpSet = true;
+            SavePersistentState();
+           }
+        }
+      // 3-2's SL tightens in two fill-count-triggered stages, each armed
+      // once and held forever: level 2+buffer once level 4 actually fills,
+      // then level 3+buffer once level 5 does too - the losing side's
+      // cross-wired mirror moves with each stage so both sides still close
+      // together at whichever line is touched first.
+      if(basket.rule32Applied && !basket.rule32Level4SlArmed &&
+         CountSidePositions(basket, liveWinDirection) >= 4)
+        {
+         double armedSl = LevelPrice(basket, liveWinDirection, 2) + liveWinDirection * (InpSlBufferCents / 100.0);
+         double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
+         ApplySideSLTP(basket, liveWinDirection, armedSl, level5Tp);
+         if(CountSidePositions(basket, -liveWinDirection) > 0)
+            ApplySideSLTP(basket, -liveWinDirection, level5Tp, armedSl);
+         Print("OneClickGrid: RULE B 3-2 level-4 filled #", basket.rootOrderTicket,
+               " | tightening SL to level 2 + buffer for every winning position");
+         basket.rule32Level4SlArmed = true;
+         SavePersistentState();
+        }
+      if(basket.rule32Applied && !basket.rule32Level5SlArmed &&
+         CountSidePositions(basket, liveWinDirection) >= 5)
+        {
+         double armedSl = LevelPrice(basket, liveWinDirection, 3) + liveWinDirection * (InpSlBufferCents / 100.0);
+         double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
+         ApplySideSLTP(basket, liveWinDirection, armedSl, level5Tp);
+         if(CountSidePositions(basket, -liveWinDirection) > 0)
+            ApplySideSLTP(basket, -liveWinDirection, level5Tp, armedSl);
+         Print("OneClickGrid: RULE B 3-2 level-5 filled #", basket.rootOrderTicket,
+               " | tightening SL to level 3 + buffer for every winning position");
+         basket.rule32Level5SlArmed = true;
          SavePersistentState();
         }
       if(basket.rule32Applied && !basket.rule32Level5Failsafe &&
@@ -1553,22 +1776,11 @@ void ApplyRuleB(CloseBasket &basket)
       matched = true;
       // Same as 3-1: the losing side's own remaining pendings are retired
       // once SL/TP is set, so it can never grow past its current 2
-      // positions.
+      // positions. SL then tightens further, in two fill-count-triggered
+      // stages, independently of this table (see the checks near the top
+      // of this function) - once for level 4 actually filling, again for
+      // level 5, never re-evaluated back down afterward either.
       retireLosingSideNow32 = !basket.rule32Applied;
-
-      // Arm once price reaches level 4, then hold - never re-evaluated
-      // back down if price retreats afterward.
-      double level4 = LevelPrice(basket, winDirection, 4);
-      double reference = (winDirection == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
-                                              : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      bool reached4 = (winDirection == 1) ? (reference >= level4) : (reference <= level4);
-      if(reached4 && !basket.rule32Armed)
-        {
-         basket.rule32Armed = true;
-         SavePersistentState();
-        }
-      if(basket.rule32Armed)
-         sl = LevelPrice(basket, winDirection, 2);
      }
    else
       return;   // unlisted combination: leave whatever was set before untouched
@@ -1640,9 +1852,21 @@ void ManageExitRules()
            }
          continue;
         }
-      if(CheckAndApplyLoserCut(g_closeBaskets[b]))
-         continue;
       ApplyRuleB(g_closeBaskets[b]);
+
+      // Once Rule B has locked this basket into any of its covered cases
+      // (3-0/3-1/3-2) it already has its own SL/TP bracket - plus, for 3-1/
+      // 3-2, its own staged tightening and overflow failsafe - managing the
+      // whole exit from here. Rule A stepping in on top of that just cuts
+      // it short before Rule B's own bracket ever gets a chance to work,
+      // which is exactly what kept happening in practice. So Rule A is
+      // only ever the safety net for the win/loss combinations Rule B
+      // does not cover at all.
+      bool ruleBLocked = g_closeBaskets[b].rule30Applied ||
+                          g_closeBaskets[b].rule31Applied ||
+                          g_closeBaskets[b].rule32Applied;
+      if(!ruleBLocked)
+         CheckAndApplyLoserCut(g_closeBaskets[b]);
      }
   }
 
@@ -1716,7 +1940,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6"};
+   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -1741,11 +1965,16 @@ void SavePersistentState(const bool forceFlush = true)
       WriteStateValue(BasketStateKey(i, "N"), (double)g_closeBaskets[i].direction);
       WriteStateValue(BasketStateKey(i, "R0"), g_closeBaskets[i].rule30Applied ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R1"), g_closeBaskets[i].rule30SlArmed ? 1.0 : 0.0);
-      WriteStateValue(BasketStateKey(i, "R2"), g_closeBaskets[i].rule32Armed ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R3"), g_closeBaskets[i].rule31Applied ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R4"), g_closeBaskets[i].rule32Applied ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R5"), g_closeBaskets[i].rule31Level4Failsafe ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R6"), g_closeBaskets[i].rule32Level5Failsafe ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R7"), g_closeBaskets[i].rule31Level4TpSet ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R8"), g_closeBaskets[i].rule31Level4SlArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R9"), g_closeBaskets[i].rule32Level4TpSet ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R10"), g_closeBaskets[i].rule32Level5TpSet ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R11"), g_closeBaskets[i].rule32Level4SlArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R12"), g_closeBaskets[i].rule32Level5SlArmed ? 1.0 : 0.0);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
       DeleteBasketStateSlot(i);
@@ -1804,14 +2033,13 @@ void LoadPersistentBaskets()
       int index = FindCloseBasket(root);
       if(index >= 0)
         {
-         double r0Value = 0.0, r1Value = 0.0, r2Value = 0.0, r3Value = 0.0, r4Value = 0.0;
-         double r5Value = 0.0, r6Value = 0.0;
+         double r0Value = 0.0, r1Value = 0.0, r3Value = 0.0, r4Value = 0.0;
+         double r5Value = 0.0, r6Value = 0.0, r7Value = 0.0, r8Value = 0.0;
+         double r9Value = 0.0, r10Value = 0.0, r11Value = 0.0, r12Value = 0.0;
          if(ReadStateValue(BasketStateKey(i, "R0"), r0Value) && r0Value > 0.5)
             g_closeBaskets[index].rule30Applied = true;
          if(ReadStateValue(BasketStateKey(i, "R1"), r1Value) && r1Value > 0.5)
             g_closeBaskets[index].rule30SlArmed = true;
-         if(ReadStateValue(BasketStateKey(i, "R2"), r2Value) && r2Value > 0.5)
-            g_closeBaskets[index].rule32Armed = true;
          if(ReadStateValue(BasketStateKey(i, "R3"), r3Value) && r3Value > 0.5)
             g_closeBaskets[index].rule31Applied = true;
          if(ReadStateValue(BasketStateKey(i, "R4"), r4Value) && r4Value > 0.5)
@@ -1820,6 +2048,18 @@ void LoadPersistentBaskets()
             g_closeBaskets[index].rule31Level4Failsafe = true;
          if(ReadStateValue(BasketStateKey(i, "R6"), r6Value) && r6Value > 0.5)
             g_closeBaskets[index].rule32Level5Failsafe = true;
+         if(ReadStateValue(BasketStateKey(i, "R7"), r7Value) && r7Value > 0.5)
+            g_closeBaskets[index].rule31Level4TpSet = true;
+         if(ReadStateValue(BasketStateKey(i, "R8"), r8Value) && r8Value > 0.5)
+            g_closeBaskets[index].rule31Level4SlArmed = true;
+         if(ReadStateValue(BasketStateKey(i, "R9"), r9Value) && r9Value > 0.5)
+            g_closeBaskets[index].rule32Level4TpSet = true;
+         if(ReadStateValue(BasketStateKey(i, "R10"), r10Value) && r10Value > 0.5)
+            g_closeBaskets[index].rule32Level5TpSet = true;
+         if(ReadStateValue(BasketStateKey(i, "R11"), r11Value) && r11Value > 0.5)
+            g_closeBaskets[index].rule32Level4SlArmed = true;
+         if(ReadStateValue(BasketStateKey(i, "R12"), r12Value) && r12Value > 0.5)
+            g_closeBaskets[index].rule32Level5SlArmed = true;
         }
      }
   }
