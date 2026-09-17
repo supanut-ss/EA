@@ -67,6 +67,7 @@ input int      InpRule32Level5CloseCents = 900;   // Rule B 3-2: level 5's own p
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260906;  // Different again from OpenOnly (20260905) and production (20260904) - three independent state/ownership scopes  // Deliberately different from the production EA's default (20260904) so the two never share persisted state or basket ownership if both ever run on the same account/symbol
+input ulong    InpFollowMagicNumber    = 0;         // Also treat this Magic Number's own market entries as a trigger, same as a manual (Magic 0) entry - 0 = follow manual entries only
 input int      InpSlippagePoints       = 100;
 input double   InpMaxSpreadPrice       = 0.20;    // 0 = disabled; otherwise reject a grid when spread exceeds this price distance
 input int      InpExpirationHours      = 0;       // 0 = good-till-cancelled
@@ -157,6 +158,14 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
      }
 
+   if(InpFollowMagicNumber != 0 && InpFollowMagicNumber == InpMagicNumber)
+     {
+      Print("OneClickGrid: InpFollowMagicNumber cannot equal InpMagicNumber - this EA's own grid ",
+            "fills would then be mistaken for new manual entries, opening a runaway basket on top ",
+            "of itself");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
    if(!SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE, g_tickSize) || g_tickSize <= 0.0 ||
       !SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN, g_volumeMin) || g_volumeMin <= 0.0 ||
       !SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX, g_volumeMax) || g_volumeMax <= 0.0 ||
@@ -243,7 +252,11 @@ void ProcessManualEntryDeal(const ulong dealTicket)
 
    if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
       return;
-   if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != 0)
+   // Trigger on a true manual entry (Magic 0) or, if configured, on another
+   // EA's own entries at InpFollowMagicNumber - either way this basket is
+   // then built and owned exactly as if it were a manual click.
+   ulong dealMagic = (ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   if(dealMagic != 0 && dealMagic != InpFollowMagicNumber)
       return;
 
    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
@@ -1079,7 +1092,12 @@ bool PositionBelongsToBasket(const CloseBasket &basket)
    if(magic == InpMagicNumber)
       return(CommentMatchesBasket(PositionGetString(POSITION_COMMENT), basket.rootOrderTicket));
 
-   if(magic == 0 && basket.manualPositionId > 0)
+   // The manual entry itself carries whichever Magic Number placed it - 0
+   // for a true manual click, or InpFollowMagicNumber when this basket was
+   // seeded by following another EA - never our own InpMagicNumber, so it
+   // is identified by position, not by our comment tag.
+   if((magic == 0 || (InpFollowMagicNumber != 0 && magic == InpFollowMagicNumber)) &&
+      basket.manualPositionId > 0)
       return((ulong)PositionGetInteger(POSITION_IDENTIFIER) == basket.manualPositionId);
 
    return(false);

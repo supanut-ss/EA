@@ -53,6 +53,7 @@ input bool     InpDebugAutoEntry       = true;    // Simulate a manual market en
 input double   InpDebugManualLot       = 0.02;    // Lot size of each simulated manual entry
 input int      InpDebugCooldownBars    = 20;      // Bars to wait after a basket empties before the next simulated entry
 input int      InpDebugDirectionMode   = 0;       // 0 = alternate Buy/Sell, 1 = always Buy, 2 = always Sell
+input ulong    InpDebugManualMagic     = 0;       // Magic Number the simulated entry uses - set to InpFollowMagicNumber to test the follow-magic path instead of true manual (0)
 
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
@@ -73,6 +74,7 @@ input int      InpRule32Level5CloseCents = 900;   // Rule B 3-2: level 5's own p
 
 input group "=== Execution Safety ==="
 input ulong    InpMagicNumber          = 20260906;  // Different again from OpenOnly (20260905) and production (20260904) - three independent state/ownership scopes  // Deliberately different from the production EA's default (20260904) so the two never share persisted state or basket ownership if both ever run on the same account/symbol
+input ulong    InpFollowMagicNumber    = 0;         // Also treat this Magic Number's own market entries as a trigger, same as a manual (Magic 0) entry - 0 = follow manual entries only
 input int      InpSlippagePoints       = 100;
 input double   InpMaxSpreadPrice       = 0.20;    // 0 = disabled; otherwise reject a grid when spread exceeds this price distance
 input int      InpExpirationHours      = 0;       // 0 = good-till-cancelled
@@ -164,6 +166,14 @@ int OnInit()
       InpExpirationHours < 0)
      {
       Print("OneClickGrid: invalid input parameters");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+
+   if(InpFollowMagicNumber != 0 && InpFollowMagicNumber == InpMagicNumber)
+     {
+      Print("OneClickGrid: InpFollowMagicNumber cannot equal InpMagicNumber - this EA's own grid ",
+            "fills would then be mistaken for new manual entries, opening a runaway basket on top ",
+            "of itself");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
@@ -274,10 +284,11 @@ void DebugHarnessMaybeOpenManualEntry()
       g_debugNextDirection = -g_debugNextDirection;
      }
 
-   // Deliberately a plain, unmanaged CTrade call at Magic 0 - the same
-   // footprint a human clicking Buy/Sell in the terminal leaves.
+   // Deliberately a plain, unmanaged CTrade call - the same footprint a
+   // human clicking Buy/Sell (Magic 0) or another EA (InpDebugManualMagic
+   // set to a non-zero value) leaves.
    CTrade debugTrade;
-   debugTrade.SetExpertMagicNumber(0);
+   debugTrade.SetExpertMagicNumber(InpDebugManualMagic);
    debugTrade.SetDeviationInPoints(InpSlippagePoints);
    debugTrade.SetTypeFillingBySymbol(_Symbol);
    bool sent = (direction == 1) ? debugTrade.Buy(InpDebugManualLot) : debugTrade.Sell(InpDebugManualLot);
@@ -303,7 +314,7 @@ void DebugHarnessCloseStrayPositions()
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != 0)
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpDebugManualMagic)
          continue;
 
       ulong positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -318,7 +329,7 @@ void DebugHarnessCloseStrayPositions()
          continue;
 
       CTrade debugTrade;
-      debugTrade.SetExpertMagicNumber(0);
+      debugTrade.SetExpertMagicNumber(InpDebugManualMagic);
       debugTrade.SetDeviationInPoints(InpSlippagePoints);
       debugTrade.SetTypeFillingBySymbol(_Symbol);
       if(!debugTrade.PositionClose(ticket, InpSlippagePoints))
@@ -344,7 +355,11 @@ void ProcessManualEntryDeal(const ulong dealTicket)
 
    if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
       return;
-   if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != 0)
+   // Trigger on a true manual entry (Magic 0) or, if configured, on another
+   // EA's own entries at InpFollowMagicNumber - either way this basket is
+   // then built and owned exactly as if it were a manual click.
+   ulong dealMagic = (ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   if(dealMagic != 0 && dealMagic != InpFollowMagicNumber)
       return;
 
    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
@@ -1180,7 +1195,12 @@ bool PositionBelongsToBasket(const CloseBasket &basket)
    if(magic == InpMagicNumber)
       return(CommentMatchesBasket(PositionGetString(POSITION_COMMENT), basket.rootOrderTicket));
 
-   if(magic == 0 && basket.manualPositionId > 0)
+   // The manual entry itself carries whichever Magic Number placed it - 0
+   // for a true manual click, or InpFollowMagicNumber when this basket was
+   // seeded by following another EA - never our own InpMagicNumber, so it
+   // is identified by position, not by our comment tag.
+   if((magic == 0 || (InpFollowMagicNumber != 0 && magic == InpFollowMagicNumber)) &&
+      basket.manualPositionId > 0)
       return((ulong)PositionGetInteger(POSITION_IDENTIFIER) == basket.manualPositionId);
 
    return(false);
