@@ -2,6 +2,16 @@
 
 EA ตัวที่ 1 จาก 2 ตัว (Trend Following & Breakout) ไฟล์โค้ด: `XAUUSD_TrendBreakout_EA.mq5`
 
+## Correctness patch (2026-09-17)
+
+- HTF EMA/ADX now use the completed H1 bar only.
+- Breakout freshness compares bar 1 and bar 2 against their own rolling Donchian channels and ATR values; continuation bars cannot reuse the same breakout event.
+- Restart no longer reprocesses the last closed M15 bar, and the daily order count is rebuilt from history.
+- Hedging accounts are required; aggregate EA volume is capped and broker tick/volume/stop constraints are validated.
+- ATR trailing activates only after profit reaches `InpTrailStartAtrMult` ATR (default 1.0).
+- Functional tester run on 2026.01.01–08.13: Net $371.95, PF 1.28, max equity DD 15.20%, 195 trades, maximum 4 consecutive losses. The report shows 0% real-tick quality, so these figures validate execution flow only, not profitability.
+- A candle body/close-location/range filter was tested on the same low-quality history and rejected (PF 1.08, DD 22.02%); it is not part of the current strategy.
+
 ## หลักการ (ทำไมออกแบบแบบนี้)
 
 - **Trend filter (H1):** EMA50 vs EMA200 + ADX(14) ≥ 20 — เทรดตามทิศทางเทรนด์ใหญ่เท่านั้น ลด false signal จากตลาด sideway

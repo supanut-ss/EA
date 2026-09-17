@@ -11,20 +11,20 @@
 ## Logic
 
 ### 1) Trend Filter (H1) — ตัดสินทิศทาง
-- EMA เร็ว (`InpEmaFast`) vs EMA ช้า (`InpEmaSlow`) บอกทิศทางเทรนด์
+- EMA เร็ว (`InpEmaFast`) vs EMA ช้า (`InpEmaSlow`) บอกทิศทางเทรนด์ โดยใช้แท่ง H1 ที่ปิดแล้ว (`shift 1`) เท่านั้น
 - ADX(`InpAdxPeriod`) ต้อง ≥ `InpAdxThreshold` ถึงจะถือว่าเทรนด์แข็งพอ (ไม่ใช่ sideway)
 - +DI/-DI ต้องสอดคล้องกับทิศทาง EMA ด้วย
 - ถ้าเงื่อนไขไม่ผ่านทั้งหมด → **ไม่เทรดเลย** (ไม่มี fallback โหมดอื่น)
 
 ### 2) Entry (M15) — Donchian Breakout
 - คำนวณกรอบ Donchian (`InpDonchianPeriod` แท่ง) จากแท่งย้อนหลัง **ไม่รวม**แท่งปัจจุบันที่กำลังก่อตัวและแท่งที่เพิ่งปิด (กันไม่ให้กรอบขยับตามราคาที่กำลังจะ breakout)
-- **กันสัญญาณหลอก (fakeout filter):** แท่งที่เพิ่งปิดต้อง close เกินกรอบด้วยระยะบัฟเฟอร์ = ATR × `InpAtrBufferMult` และแท่งก่อนหน้ามันต้อง**ยังไม่**เกินบัฟเฟอร์นี้ — เข้าเฉพาะแท่งที่เพิ่ง breakout จริง ไม่ไล่ราคาที่วิ่งไปแล้ว
+- **กันสัญญาณหลอก (fakeout filter):** แท่งที่เพิ่งปิดต้อง close เกินกรอบด้วยระยะบัฟเฟอร์ = ATR × `InpAtrBufferMult` และแท่งก่อนหน้าต้องไม่ breakout เมื่อเทียบกับ Donchian/ATR ของแท่งก่อนหน้าเอง จึงใช้สัญญาณแรกของ breakout event เท่านั้น
 - ทิศทางไม้ต้องตรงกับ trend bias จาก H1 เท่านั้น (buy เมื่อเทรนด์ขึ้น, sell เมื่อเทรนด์ลง)
 
 ### 3) Exit
 - SL = ราคาเข้า − ATR × `InpAtrSlMult`
 - TP = ระยะ SL × `InpRiskReward`
-- Trailing Stop (ถ้า `InpUseTrailing=true`): เลื่อน SL ตาม ATR × `InpTrailAtrMult` เมื่อราคาไปในทางที่ได้กำไร
+- Trailing Stop (ถ้า `InpUseTrailing=true`): เริ่มทำงานเมื่อกำไรถึง ATR × `InpTrailStartAtrMult` แล้วจึงเลื่อน SL ตาม ATR × `InpTrailAtrMult`
 
 ### 4) Filters (ต้องผ่านทุกอันก่อนเข้าไม้)
 - อยู่ในช่วงเวลาเทรด (`InpSessionStartHour`–`InpSessionEndHour`, เวลา broker/server)
@@ -32,7 +32,10 @@
 - ถ้าเป็นวันศุกร์และเลย `InpFridayCutoffHour` (เมื่อ `InpAvoidFriday=true`) → หยุดเทรด
 - สแปรดต้อง ≤ `InpMaxSpreadPoints`
 - ไม้เปิดของ EA นี้ต้อง < `InpMaxOpenPositions`
+- ปริมาณรวมต้องไม่เกิน `InpLotSize × InpMaxOpenPositions` และ broker `SYMBOL_VOLUME_LIMIT`
 - ไม้ที่เปิดวันนี้ต้อง < `InpMaxTradesPerDay`
+- daily counter ถูกกู้จากประวัติ order หลัง restart; attach กลางแท่งจะไม่ประมวลผลสัญญาณเก่าซ้ำ
+- ปฏิเสธบัญชี netting เพราะหลาย EA บน XAUUSD ไม่สามารถแยก ownership ด้วย magic number ได้อย่างปลอดภัย
 
 **หมายเหตุ:** EA นี้ไม่มี hard safety แบบ "ปิดไม้ก่อนตลาดปิด" เหมือน EA #2 — ใช้แค่ session/Friday/Sunday filter (บล็อกไม้ใหม่เท่านั้น ไม่ force-close ไม้ที่เปิดอยู่)
 
@@ -57,16 +60,17 @@
 | Risk | `InpRiskReward` | 1.8 |
 | Risk | `InpUseTrailing` | true |
 | Risk | `InpTrailAtrMult` | 1.2 |
+| Risk | `InpTrailStartAtrMult` | 1.0 |
 | Session | `InpSessionStartHour` / `InpSessionEndHour` | 6 / 23 |
 | Session | `InpAvoidFriday` / `InpFridayCutoffHour` | true / 20 |
 | Session | `InpAvoidSunday` | true |
 | Spread | `InpMaxSpreadPoints` | 350 points |
-| Backend Ingest | `InpIngestEnabled` | **false** (ปิดอยู่ ต้องเปิดเอง) |
-| Backend Ingest | `InpIngestBaseUrl` | `http://localhost:5008` (ตรงกับ `Backend/EaConsole.Api/Properties/launchSettings.json`) |
+| Backend Ingest | `InpIngestEnabled` | **true** (Strategy Tester บังคับปิดอัตโนมัติ) |
+| Backend Ingest | `InpIngestBaseUrl` | `https://ea.thaipesleague.com` |
 | Backend Ingest | `InpIngestAccountId` / `InpIngestEaId` | 1 / 1 |
-| Backend Ingest | `InpIngestHeartbeatSec` | 10 วินาที |
+| Backend Ingest | `InpIngestHeartbeatSec` | 29 วินาที |
 | Backend Ingest | `InpIngestTimeoutMs` | 5000 ms |
-| Backend Ingest | `InpIngestApiKey` | "" (ว่าง — ใส่ตรงกับ `Ingest:ApiKey` ของ backend ตอน deploy จริง) |
+| Backend Ingest | `InpIngestApiKey` | ตั้งค่า compiled default ให้ตรงกับ production backend (ไม่แสดงค่าในเอกสาร) |
 
 ## Backend Ingest (Webhook + Heartbeat)
 
@@ -79,22 +83,26 @@
 - **Error log:** ถ้า `OrderSend` ล้มเหลว ยิง `POST /api/ingest/log` ระดับ `error`
 - **Upsert key ฝั่ง backend คือ (`accountId`, `mt5Ticket`)** — ใช้ MT5 Position ID เดียวกันทั้งตอนเปิดและปิดไม้ (ไม่ใช่ order ticket) ตรงกับที่ `IngestService.cs` คาดหวังไว้พอดี ไม่ต้องรู้ trade_id ภายในของ backend
 
-**ปิดอยู่โดย default (`InpIngestEnabled=false`)** — เป็น no-op ทั้งหมดจนกว่าจะเปิดเอง (ยืนยันแล้วด้วย backtest 2 รอบ: ผลลัพธ์เหมือนเดิมทุกตัวเลขตอนปิด แม้เพิ่ม `OrderCalcProfit()` เข้าไปแล้วก็ตาม) **ห้ามเปิดตอน backtest/optimize** เพราะ WebRequest จะยิงจริงจากทุก tester agent ที่รันพร้อมกัน ช้าและไม่มีประโยชน์กับข้อมูลย้อนหลัง ก่อนใช้งานจริง (live/demo) ต้องเพิ่ม `InpIngestBaseUrl` ใน MT5: **Tools > Options > Expert Advisors > Allow WebRequest for listed URL** ก่อน ไม่งั้นทุกคำขอจะพังด้วย error 4060 (มี log ผ่าน `Print()` ให้เห็นเสมอ ไม่ fail แบบเงียบ)
+**เปิดอยู่โดย default บน live/demo แต่ถูกบังคับเป็น no-op เมื่อ `MQL_TESTER=true`** จึงไม่ยิง WebRequest ระหว่าง backtest/optimization แม้ input เปิดอยู่ ก่อนใช้งานจริงต้องเพิ่ม `InpIngestBaseUrl` ใน MT5: **Tools > Options > Expert Advisors > Allow WebRequest for listed URL** ไม่เช่นนั้นคำขอจะล้มเหลวด้วย error 4060
 
 **⚠️ พบความไม่ตรงกัน (ยังไม่ได้แก้):** `Backend/Database/seed_sample_data.sql` ตั้ง `magic_number` ของ EA ตัวนี้ไว้เป็น `100001` แต่ EA จริงใช้ `InpMagicNumber=20260811` — ไม่กระทบการทำงานของ ingest ปัจจุบัน (`IngestService.cs` ไม่ได้เช็ค magic_number ตอนรับข้อมูล ใช้ `EaId` ที่ส่งมาตรงๆ) แต่ข้อมูลใน `eas` table จะไม่ตรงกับความจริง ถ้าจะให้ตรงต้องอัปเดต seed data หรือ column นี้ทีหลัง
 
-**เตรียม deploy จริงแล้ว (12 ส.ค. 2026):** backend ปรับให้พร้อมขึ้น host จริงแล้ว — ดู [Backend/DEPLOYMENT.md](../Backend/DEPLOYMENT.md) เต็มๆ สรุปสั้น: เพิ่ม `UseForwardedHeaders()` (รองรับ reverse proxy), `GET /health` (สำหรับ uptime monitor), และ **`Ingest:ApiKey`** — ถ้า backend ตั้งค่านี้ไว้ (ผ่าน env var `Ingest__ApiKey`) endpoint `/api/ingest/*` จะเช็ค header `X-Api-Key` ทุกครั้ง ต้องตั้ง `InpIngestApiKey` ที่ EA ให้ตรงกัน (ปิดอยู่โดย default ทั้งสองฝั่ง — ถ้าไม่ตั้งอะไรเลยพฤติกรรมเหมือนเดิม)
+**เตรียม deploy จริงแล้ว (12 ส.ค. 2026):** backend รองรับ reverse proxy, `GET /health` และการตรวจ `X-Api-Key` ผ่าน `Ingest__ApiKey`; compiled default ของ EA ต้องตรงกับ backend และควรหมุนค่า key พร้อมกันทั้งสองฝั่งเมื่อมีการเปลี่ยนแปลง
 
 ## Custom OnTester() Score
 
 ให้คะแนน = กำไร × ปรับตามความถี่ไม้ (เต็ม 1.0 ถ้าอยู่ในช่วง **2-3 ไม้/วัน**, ลดถ้าน้อย/มากกว่านั้น) × ปรับตาม drawdown (ลดคะแนนหนักขึ้นเมื่อ Equity DD relative เกิน ~20-25%) — ใช้เป็น Optimization Criterion=5 (Custom) ตอนรัน genetic optimize เพื่อให้หาค่าที่สมดุลกำไร/ความถี่/DD ไม่ใช่กำไรดิบอย่างเดียว
 
-## ผล Backtest ล่าสุด (6 เดือน, 2026.02.11–08.11, M15 real ticks, deposit $1,000)
+## ผล Backtest ปัจจุบันหลัง correctness patch (2026.09.17)
 
-Net Profit **$427.58** | Profit Factor **1.37** | Max Equity DD **13.24% ($182.27)** | ไม้ **252 (~1.95/วัน)**
+Strategy Tester functional run ช่วง 2026.01.01–08.13, M15, deposit $1,000: Net Profit **$371.95** | Profit Factor **1.28** | Max Equity DD **15.20% ($212.68)** | ไม้ **195** | แพ้ติดสูงสุด **4 ไม้** อย่างไรก็ตาม report รอบนี้ระบุ History Quality **0% real ticks** จึงใช้ยืนยันเฉพาะว่า flow ทำงานครบ ไม่ใช้ยืนยัน performance หรือ edge
+
+ทดลองเพิ่ม candle body/close-location/range filter บนข้อมูลชุดเดียวกันแล้วผลแย่ลง: Net Profit $91.45, PF 1.08, DD 22.02%, 159 ไม้ จึงไม่รวม filter นี้ในโค้ดปัจจุบัน; ผลนี้เป็น directional A/B เท่านั้นเพราะ History Quality ต่ำ
 
 ## ข้อจำกัด/สิ่งที่ยังไม่ทำ
 
 - ผลทั้งหมดยังเป็น **in-sample** เดียวกัน ไม่มี out-of-sample/walk-forward validation
+- functional run ปัจจุบันมี History Quality 0% real ticks จึงต้องดาวน์โหลด/ซ่อม real-tick history แล้วรันใหม่ก่อนเทียบ performance
+- รอบ OOS 2026.08.14–09.17 มี real ticks เพียง 38% และ 39 ไม้ จึงยังใช้ยืนยัน edge ไม่ได้
 - ยังไม่ forward-test บนบัญชีเดโมจริง
-- Webhook พร้อมใช้แล้ว แต่**ยังไม่เคยทดสอบยิงเข้า backend จริง** (แค่ยืนยันว่าปิดแล้วไม่กระทบผล backtest) — ต้องรัน backend, เปิด `InpIngestEnabled=true`, ตั้ง URL ที่ MT5 allow-list แล้วทดสอบยิงจริงก่อนใช้งาน
+- Webhook เปิดอยู่โดย default แต่**ยังไม่เคยทดสอบยิงเข้า backend จริง** — ต้องยืนยัน backend key, เพิ่ม production URL ใน MT5 allow-list และทดสอบ heartbeat/open/close end-to-end ก่อนใช้งาน

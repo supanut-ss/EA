@@ -25,7 +25,7 @@
 //|  parameter rationale.                                             |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - Trend Following & Breakout"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -79,6 +79,7 @@ input double   InpAtrSlMult        = 1.5;        // ATR Multiplier for Stop Loss
 input double   InpRiskReward       = 1.8;        // Risk:Reward Ratio (TP distance)
 input bool     InpUseTrailing      = true;       // Use ATR Trailing Stop
 input double   InpTrailAtrMult     = 1.2;        // Trailing Stop ATR Multiplier
+input double   InpTrailStartAtrMult= 1.0;        // Activate trailing only after this ATR profit
 
 input group "=== Breakeven (profit lock) - TESTED AND REJECTED, default OFF ==="
 // Ported from EA #3 (which exits its stops at an average of +1.02 instead of this
@@ -126,14 +127,134 @@ int handleEmaFast, handleEmaSlow, handleAdx, handleAtrEntry;
 datetime lastBarTime   = 0;
 datetime lastTradeDay  = 0;
 int      tradesToday   = 0;
+bool     dailyCounterReady = false;
 string   symbolName;
 datetime g_testStartTime = 0;
+
+//+------------------------------------------------------------------+
+bool IsTradeRetcodeSuccessful()
+{
+   uint retcode = trade.ResultRetcode();
+   return (retcode == TRADE_RETCODE_DONE ||
+           retcode == TRADE_RETCODE_DONE_PARTIAL);
+}
+
+//+------------------------------------------------------------------+
+double NormalizePriceToTick(double price, int direction)
+{
+   double tickSize = SymbolInfoDouble(symbolName, SYMBOL_TRADE_TICK_SIZE);
+   int digits = (int)SymbolInfoInteger(symbolName, SYMBOL_DIGITS);
+   if(tickSize <= 0) tickSize = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   if(tickSize <= 0) return NormalizeDouble(price, digits);
+
+   double ticks = price / tickSize;
+   if(direction < 0) ticks = MathFloor(ticks + 1e-9);
+   else if(direction > 0) ticks = MathCeil(ticks - 1e-9);
+   else ticks = MathRound(ticks);
+   return NormalizeDouble(ticks * tickSize, digits);
+}
+
+//+------------------------------------------------------------------+
+double NormalizeVolume(double volume)
+{
+   double minVolume = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_MAX);
+   double step      = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
+   if(step <= 0 || minVolume <= 0 || maxVolume <= 0) return 0;
+   if(volume < minVolume || volume > maxVolume) return 0;
+
+   double steps = MathFloor((volume + 1e-12) / step);
+   double normalized = NormalizeDouble(steps * step, 8);
+   if(normalized < minVolume) return 0;
+   return normalized;
+}
+
+//+------------------------------------------------------------------+
+double GetOpenVolume()
+{
+   double volume = 0;
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbolName) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber) continue;
+      volume += PositionGetDouble(POSITION_VOLUME);
+   }
+   return volume;
+}
+
+//+------------------------------------------------------------------+
+datetime BrokerDayStart()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+   return StructToTime(dt);
+}
+
+//+------------------------------------------------------------------+
+bool LoadTodayEntryOrderCount(int &count)
+{
+   count = 0;
+   datetime dayStart = BrokerDayStart();
+   if(!HistorySelect(dayStart, TimeCurrent() + 1)) return false;
+
+   ulong countedOrders[];
+   for(int i=0; i<HistoryDealsTotal(); i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbolName) continue;
+      if((ulong)HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_IN && entry != DEAL_ENTRY_INOUT) continue;
+
+      ulong orderTicket = (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER);
+      if(orderTicket == 0) continue;
+      bool alreadyCounted = false;
+      for(int j=0; j<ArraySize(countedOrders); j++)
+      {
+         if(countedOrders[j] == orderTicket)
+         {
+            alreadyCounted = true;
+            break;
+         }
+      }
+      if(alreadyCounted) continue;
+
+      int size = ArraySize(countedOrders);
+      if(ArrayResize(countedOrders, size + 1) != size + 1) return false;
+      countedOrders[size] = orderTicket;
+      count++;
+   }
+   return true;
+}
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
    symbolName = _Symbol;
    g_testStartTime = TimeCurrent();
+
+   ENUM_ACCOUNT_MARGIN_MODE marginMode = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   if(marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   {
+      Print("Initialization failed: this EA requires a hedging account so positions can be isolated by magic number.");
+      return(INIT_FAILED);
+   }
+
+   if(InpLotSize <= 0 || InpMaxOpenPositions < 1 || InpMaxTradesPerDay < 1 ||
+      InpDonchianPeriod < 2 || InpAtrPeriod < 2 ||
+      InpAtrBufferMult < 0 || InpAtrSlMult <= 0 || InpRiskReward <= 0 ||
+      InpTrailAtrMult <= 0 || InpTrailStartAtrMult < 0)
+   {
+      Print("Initialization failed: invalid strategy input(s)");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
 
    handleEmaFast  = iMA(symbolName, InpTrendTF, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
    handleEmaSlow  = iMA(symbolName, InpTrendTF, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
@@ -150,6 +271,12 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(symbolName);
+
+   lastBarTime  = iTime(symbolName, InpEntryTF, 0);
+   lastTradeDay = TimeCurrent();
+   dailyCounterReady = LoadTodayEntryOrderCount(tradesToday);
+   if(!dailyCounterReady)
+      Print("Trade history is not ready; entries remain blocked until the daily counter can be rebuilt.");
 
    EventSetTimer(InpIngestHeartbeatSec);
    IngestPrintStartupInfo();
@@ -188,6 +315,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 bool IsNewBar()
 {
    datetime t = iTime(symbolName, InpEntryTF, 0);
+   if(t <= 0) return false;
+   if(lastBarTime == 0)
+   {
+      lastBarTime = t;
+      return false;
+   }
    if(t != lastBarTime)
    {
       lastBarTime = t;
@@ -203,10 +336,17 @@ void ResetDailyCounterIfNeeded()
    TimeToStruct(TimeCurrent(), now);
    TimeToStruct(lastTradeDay, lastDay);
 
-   if(lastTradeDay == 0 || now.day != lastDay.day || now.mon != lastDay.mon || now.year != lastDay.year)
+   bool dayChanged = (lastTradeDay == 0 || now.day != lastDay.day ||
+                      now.mon != lastDay.mon || now.year != lastDay.year);
+   if(dayChanged || !dailyCounterReady)
    {
-      tradesToday  = 0;
-      lastTradeDay = TimeCurrent();
+      int restoredCount = 0;
+      dailyCounterReady = LoadTodayEntryOrderCount(restoredCount);
+      if(dailyCounterReady)
+      {
+         tradesToday  = restoredCount;
+         lastTradeDay = TimeCurrent();
+      }
    }
 }
 
@@ -224,6 +364,35 @@ bool IsWithinSession()
       return (now.hour >= InpSessionStartHour && now.hour < InpSessionEndHour);
    else
       return (now.hour >= InpSessionStartHour || now.hour < InpSessionEndHour);
+}
+
+//+------------------------------------------------------------------+
+bool IsSymbolTradeSessionOpen()
+{
+   ENUM_SYMBOL_TRADE_MODE tradeMode = (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(symbolName, SYMBOL_TRADE_MODE);
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED) return false;
+
+   MqlDateTime now;
+   TimeToStruct(TimeTradeServer(), now);
+   int nowSeconds = now.hour * 3600 + now.min * 60 + now.sec;
+
+   for(uint sessionIndex=0; ; sessionIndex++)
+   {
+      datetime sessionFrom, sessionTo;
+      if(!SymbolInfoSessionTrade(symbolName, (ENUM_DAY_OF_WEEK)now.day_of_week,
+                                 sessionIndex, sessionFrom, sessionTo))
+         break;
+
+      long fromSeconds = (long)sessionFrom % 86400;
+      long toSeconds   = (long)sessionTo % 86400;
+      // Equal endpoints represent a full 24-hour session. For overnight
+      // sessions, move the close and pre-open clock into the following day.
+      if(toSeconds <= fromSeconds) toSeconds += 86400;
+      long comparableNow = nowSeconds;
+      if(comparableNow < fromSeconds) comparableNow += 86400;
+      if(comparableNow >= fromSeconds && comparableNow < toSeconds) return true;
+   }
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -254,18 +423,18 @@ int CountOpenPositions()
 // Returns 1 = bullish trend, -1 = bearish trend, 0 = no clear trend
 int GetTrendBias()
 {
-   double emaFast[], emaSlow[], adxMain[], adxPlus[], adxMinus[];
-   ArraySetAsSeries(emaFast, true);
-   ArraySetAsSeries(emaSlow, true);
-   ArraySetAsSeries(adxMain, true);
-   ArraySetAsSeries(adxPlus, true);
-   ArraySetAsSeries(adxMinus, true);
+   if(BarsCalculated(handleEmaFast) < InpEmaSlow + 2 ||
+      BarsCalculated(handleEmaSlow) < InpEmaSlow + 2 ||
+      BarsCalculated(handleAdx) < InpAdxPeriod + 2)
+      return 0;
 
-   if(CopyBuffer(handleEmaFast, 0, 0, 3, emaFast) < 3) return 0;
-   if(CopyBuffer(handleEmaSlow, 0, 0, 3, emaSlow) < 3) return 0;
-   if(CopyBuffer(handleAdx, 0, 0, 3, adxMain) < 3) return 0;
-   if(CopyBuffer(handleAdx, 1, 0, 3, adxPlus) < 3) return 0;
-   if(CopyBuffer(handleAdx, 2, 0, 3, adxMinus) < 3) return 0;
+   double emaFast[1], emaSlow[1], adxMain[1], adxPlus[1], adxMinus[1];
+   // Shift 1: use only the completed H1 candle. The bias must not change intrabar.
+   if(CopyBuffer(handleEmaFast, 0, 1, 1, emaFast) != 1) return 0;
+   if(CopyBuffer(handleEmaSlow, 0, 1, 1, emaSlow) != 1) return 0;
+   if(CopyBuffer(handleAdx, 0, 1, 1, adxMain) != 1) return 0;
+   if(CopyBuffer(handleAdx, 1, 1, 1, adxPlus) != 1) return 0;
+   if(CopyBuffer(handleAdx, 2, 1, 1, adxMinus) != 1) return 0;
 
    bool adxOk = adxMain[0] >= InpAdxThreshold;
 
@@ -282,10 +451,10 @@ int GetTrendBias()
 // starting at shift 2 (i.e. EXCLUDING the current forming bar [0] and
 // the last closed bar [1], which is the candidate breakout bar).
 //+------------------------------------------------------------------+
-bool GetDonchianLevels(double &channelHigh, double &channelLow)
+bool GetDonchianLevels(int startShift, double &channelHigh, double &channelLow)
 {
-   int highestIdx = iHighest(symbolName, InpEntryTF, MODE_HIGH, InpDonchianPeriod, 2);
-   int lowestIdx  = iLowest(symbolName, InpEntryTF, MODE_LOW, InpDonchianPeriod, 2);
+   int highestIdx = iHighest(symbolName, InpEntryTF, MODE_HIGH, InpDonchianPeriod, startShift);
+   int lowestIdx  = iLowest(symbolName, InpEntryTF, MODE_LOW, InpDonchianPeriod, startShift);
    if(highestIdx < 0 || lowestIdx < 0) return false;
 
    channelHigh = iHigh(symbolName, InpEntryTF, highestIdx);
@@ -294,11 +463,12 @@ bool GetDonchianLevels(double &channelHigh, double &channelLow)
 }
 
 //+------------------------------------------------------------------+
-double GetAtr()
+double GetAtr(int shift=1)
 {
    double atr[];
    ArraySetAsSeries(atr, true);
-   if(CopyBuffer(handleAtrEntry, 0, 1, 1, atr) < 1) return 0;
+   if(BarsCalculated(handleAtrEntry) < InpAtrPeriod + shift + 1) return 0;
+   if(CopyBuffer(handleAtrEntry, 0, shift, 1, atr) != 1) return 0;
    return atr[0];
 }
 
@@ -365,8 +535,22 @@ bool IsLossGuardBlocking()
 //+------------------------------------------------------------------+
 void CheckForEntry()
 {
+   if(!dailyCounterReady) { Print("Entry skip: daily trade counter unavailable"); return; }
    if(CountOpenPositions() >= InpMaxOpenPositions) { Print("Entry skip: max open positions (", InpMaxOpenPositions, ")"); return; }
    if(tradesToday >= InpMaxTradesPerDay) { Print("Entry skip: daily trade cap reached (", InpMaxTradesPerDay, ")"); return; }
+
+   double orderVolume = NormalizeVolume(InpLotSize);
+   if(orderVolume <= 0) { Print("Entry skip: lot size is below broker minimum or symbol volume data is unavailable"); return; }
+   double maxAggregateVolume = orderVolume * InpMaxOpenPositions;
+   double symbolVolumeLimit = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_LIMIT);
+   if(symbolVolumeLimit > 0)
+      maxAggregateVolume = MathMin(maxAggregateVolume, symbolVolumeLimit);
+   double volumeStep = SymbolInfoDouble(symbolName, SYMBOL_VOLUME_STEP);
+   if(GetOpenVolume() + orderVolume > maxAggregateVolume + volumeStep * 0.5)
+   {
+      Print("Entry skip: aggregate volume cap reached (", DoubleToString(maxAggregateVolume, 2), ")");
+      return;
+   }
    if(!IsWithinSession())
    {
       MqlDateTime nowDt;
@@ -374,19 +558,25 @@ void CheckForEntry()
       Print("Entry skip: outside session (hour=", nowDt.hour, " dow=", nowDt.day_of_week, ")");
       return;
    }
+   if(!IsSymbolTradeSessionOpen()) { Print("Entry skip: broker trade session is closed"); return; }
    if(!IsSpreadOk()) { Print("Entry skip: spread ", (int)SymbolInfoInteger(symbolName, SYMBOL_SPREAD), " > max ", (int)InpMaxSpreadPoints, " pts"); return; }
    if(IsLossGuardBlocking()) { Print("Entry skip: loss guard active"); return; }
 
    int trend = GetTrendBias();
    if(trend == 0) { Print("Entry skip: H1 trend unclear"); return; }
 
-   double channelHigh, channelLow;
-   if(!GetDonchianLevels(channelHigh, channelLow)) return;
+   if(Bars(symbolName, InpEntryTF) < InpDonchianPeriod + 3) return;
 
-   double atr = GetAtr();
-   if(atr <= 0) return;
+   double channelHigh, channelLow, previousChannelHigh, previousChannelLow;
+   if(!GetDonchianLevels(2, channelHigh, channelLow)) return;
+   if(!GetDonchianLevels(3, previousChannelHigh, previousChannelLow)) return;
+
+   double atr = GetAtr(1);
+   double previousAtr = GetAtr(2);
+   if(atr <= 0 || previousAtr <= 0) return;
 
    double buffer = atr * InpAtrBufferMult;
+   double previousBuffer = previousAtr * InpAtrBufferMult;
 
    // Use the last CLOSED bar (index 1) for confirmation, and the bar
    // before it (index 2) to make sure we catch the breakout bar itself.
@@ -396,7 +586,9 @@ void CheckForEntry()
    double ask = SymbolInfoDouble(symbolName, SYMBOL_ASK);
    double bid = SymbolInfoDouble(symbolName, SYMBOL_BID);
 
-   if(trend == 1 && closeLast > channelHigh + buffer && closePrev <= channelHigh + buffer)
+   if(trend == 1 &&
+      closeLast > channelHigh + buffer &&
+      closePrev <= previousChannelHigh + previousBuffer)
    {
       double sl = ask - atr * InpAtrSlMult;
       double slDist = ask - sl;
@@ -406,7 +598,9 @@ void CheckForEntry()
          DoubleToString(closeLast, 2), DoubleToString(channelHigh, 2), DoubleToString(buffer, 2)));
       OpenTrade(ORDER_TYPE_BUY, sl, tp);
    }
-   else if(trend == -1 && closeLast < channelLow - buffer && closePrev >= channelLow - buffer)
+   else if(trend == -1 &&
+           closeLast < channelLow - buffer &&
+           closePrev >= previousChannelLow - previousBuffer)
    {
       double sl = bid + atr * InpAtrSlMult;
       double slDist = sl - bid;
@@ -426,20 +620,54 @@ void CheckForEntry()
 //+------------------------------------------------------------------+
 void OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp)
 {
-   int digits = (int)SymbolInfoInteger(symbolName, SYMBOL_DIGITS);
-   sl = NormalizeDouble(sl, digits);
-   tp = NormalizeDouble(tp, digits);
+   MqlTick tick;
+   if(!SymbolInfoTick(symbolName, tick))
+   {
+      Print("OrderSend skipped: current tick unavailable");
+      return;
+   }
+
+   double volume = NormalizeVolume(InpLotSize);
+   if(volume <= 0)
+   {
+      Print("OrderSend skipped: invalid normalized volume for input lot ", InpLotSize);
+      return;
+   }
+
+   double point = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   double minStopDistance = (double)SymbolInfoInteger(symbolName, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   if(type == ORDER_TYPE_BUY)
+   {
+      sl = NormalizePriceToTick(sl, -1);
+      tp = NormalizePriceToTick(tp, 1);
+      if(sl <= 0 || sl >= tick.bid - minStopDistance || tp <= tick.ask + minStopDistance)
+      {
+         Print("OrderSend skipped: BUY stops violate broker stop distance");
+         return;
+      }
+   }
+   else
+   {
+      sl = NormalizePriceToTick(sl, 1);
+      tp = NormalizePriceToTick(tp, -1);
+      if(sl <= tick.ask + minStopDistance || tp <= 0 || tp >= tick.bid - minStopDistance)
+      {
+         Print("OrderSend skipped: SELL stops violate broker stop distance");
+         return;
+      }
+   }
 
    bool result = false;
    if(type == ORDER_TYPE_BUY)
-      result = trade.Buy(InpLotSize, symbolName, 0, sl, tp, "TrendBreakout Buy");
+      result = trade.Buy(volume, symbolName, 0, sl, tp, "TrendBreakout Buy");
    else
-      result = trade.Sell(InpLotSize, symbolName, 0, sl, tp, "TrendBreakout Sell");
+      result = trade.Sell(volume, symbolName, 0, sl, tp, "TrendBreakout Sell");
 
-   if(result)
+   if(result && IsTradeRetcodeSuccessful())
    {
       tradesToday++;
-      Print("Trade opened: ", EnumToString(type), " Lots=", InpLotSize, " SL=", sl, " TP=", tp);
+      Print("Trade opened: ", EnumToString(type), " Lots=", volume, " SL=", sl, " TP=", tp,
+            " Retcode=", trade.ResultRetcode());
    }
    else
    {
@@ -463,12 +691,17 @@ void OpenTrade(ENUM_ORDER_TYPE type, double sl, double tp)
 void ManagePositionStops()
 {
    if(!InpUseTrailing && !InpUseBreakeven) return;
+   if(!IsSymbolTradeSessionOpen()) return;
 
    double atr = GetAtr();
    if(atr <= 0) return;
 
-   int    digits = (int)SymbolInfoInteger(symbolName, SYMBOL_DIGITS);
    double point  = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   double tickSize = SymbolInfoDouble(symbolName, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0) tickSize = point;
+   double stopDistance = (double)SymbolInfoInteger(symbolName, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double freezeDistance = (double)SymbolInfoInteger(symbolName, SYMBOL_TRADE_FREEZE_LEVEL) * point;
+   double minDistance = MathMax(stopDistance, freezeDistance);
    double lock   = InpBELockPoints * point;
 
    for(int i=0; i<PositionsTotal(); i++)
@@ -495,14 +728,19 @@ void ManagePositionStops()
          }
          if(InpUseTrailing)
          {
-            double trailSl = bid - atr * InpTrailAtrMult;
-            if(trailSl > desiredSl) desiredSl = trailSl;
+            if((bid - openPrice) >= atr * InpTrailStartAtrMult)
+            {
+               double trailSl = bid - atr * InpTrailAtrMult;
+               if(trailSl > desiredSl) desiredSl = trailSl;
+            }
          }
 
-         desiredSl = NormalizeDouble(desiredSl, digits);
-         if(desiredSl > posSl && desiredSl < bid)
+         desiredSl = MathMin(desiredSl, bid - minDistance);
+         desiredSl = NormalizePriceToTick(desiredSl, -1);
+         if(desiredSl > posSl + tickSize * 0.5 && desiredSl < bid - minDistance + tickSize * 0.5)
          {
-            if(!trade.PositionModify(ticket, desiredSl, posTp))
+            bool modified = trade.PositionModify(ticket, desiredSl, posTp);
+            if(!modified || (!IsTradeRetcodeSuccessful() && trade.ResultRetcode() != TRADE_RETCODE_NO_CHANGES))
                Print("Stop modify failed: ticket=", ticket, " BUY SL->", desiredSl,
                      " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
          }
@@ -521,15 +759,21 @@ void ManagePositionStops()
          }
          if(InpUseTrailing)
          {
-            double trailSl = ask + atr * InpTrailAtrMult;
-            if(trailSl < desiredSl) desiredSl = trailSl;
+            if((openPrice - ask) >= atr * InpTrailStartAtrMult)
+            {
+               double trailSl = ask + atr * InpTrailAtrMult;
+               if(trailSl < desiredSl) desiredSl = trailSl;
+            }
          }
 
          if(desiredSl == DBL_MAX) continue;
-         desiredSl = NormalizeDouble(desiredSl, digits);
-         if((posSl == 0 || desiredSl < posSl) && desiredSl > ask)
+         desiredSl = MathMax(desiredSl, ask + minDistance);
+         desiredSl = NormalizePriceToTick(desiredSl, 1);
+         if((posSl == 0 || desiredSl < posSl - tickSize * 0.5) &&
+            desiredSl > ask + minDistance - tickSize * 0.5)
          {
-            if(!trade.PositionModify(ticket, desiredSl, posTp))
+            bool modified = trade.PositionModify(ticket, desiredSl, posTp);
+            if(!modified || (!IsTradeRetcodeSuccessful() && trade.ResultRetcode() != TRADE_RETCODE_NO_CHANGES))
                Print("Stop modify failed: ticket=", ticket, " SELL SL->", desiredSl,
                      " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
          }
