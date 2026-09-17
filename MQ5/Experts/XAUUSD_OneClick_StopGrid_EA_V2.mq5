@@ -1194,10 +1194,14 @@ void DeleteSidePendingOrders(const CloseBasket &basket, const int direction)
 //+------------------------------------------------------------------+
 // Cancels one specific level's own pending order on one side, if it is
 // still live - leaves every other pending, on either side, untouched.
-void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, const int level)
+// Returns true only once nothing matching is left live - a failed delete
+// (requote, market closed) leaves a matching order behind and reports
+// false, so the caller knows to retry rather than treat this as done.
+bool DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, const int level)
   {
    double levelPrice = LevelPrice(basket, direction, level);
    double tolerance = GridStepPrice() / 2.0;
+   bool allClear = true;
    for(int i=OrdersTotal()-1; i>=0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -1215,8 +1219,13 @@ void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, 
          continue;
 
       if(!trade.OrderDelete(ticket) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
-         Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription());
+        {
+         Print("OneClickGrid: pending delete failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
+         allClear = false;
+        }
      }
+   return(allClear);
   }
 
 //+------------------------------------------------------------------+
@@ -1229,6 +1238,10 @@ void DeleteBasketPendingAtLevel(const CloseBasket &basket, const int direction, 
 // tighter distance) should already have closed the official 3 winners, so
 // in practice this only ever touches the extra, unprotected overflow
 // fill(s). Returns true once the threshold is reached and acted on.
+// Returns true only once the level is genuinely clear (no matching pending,
+// no matching position) - a failed close/cancel returns false so the
+// caller retries on the next tick instead of marking this permanently
+// done while the position is still actually live.
 bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const int level, const double extraCents)
   {
    double levelPrice = LevelPrice(basket, direction, level);
@@ -1239,8 +1252,9 @@ bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const 
    if(!reached)
       return(false);
 
-   DeleteBasketPendingAtLevel(basket, direction, level);
+   bool pendingClear = DeleteBasketPendingAtLevel(basket, direction, level);
 
+   bool positionsClear = true;
    ENUM_POSITION_TYPE posType = (direction == 1) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -1250,9 +1264,13 @@ bool EnforceLevelFailsafe(const CloseBasket &basket, const int direction, const 
       if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != posType)
          continue;
       if(!trade.PositionClose(ticket, InpSlippagePoints) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
-         Print("OneClickGrid: RULE B failsafe close failed #", ticket, " | ", trade.ResultRetcodeDescription());
+        {
+         Print("OneClickGrid: RULE B failsafe close failed #", ticket, " | ", trade.ResultRetcodeDescription(),
+               " | it is retried on the following ticks");
+         positionsClear = false;
+        }
      }
-   return(true);
+   return(pendingClear && positionsClear);
   }
 
 //+------------------------------------------------------------------+
