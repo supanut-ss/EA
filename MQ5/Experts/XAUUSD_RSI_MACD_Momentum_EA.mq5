@@ -144,14 +144,14 @@ double NormPrice(double p)
    return NormalizeDouble(MathRound(p/ts)*ts, _Digits);
 }
 
-double NormLot(double lot)
+double NormLotDown(double lot)
 {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double mn   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double mx   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(step <= 0) step = 0.01;
-   lot = MathFloor(lot/step + 1e-9) * step;
-   lot = MathMax(mn, MathMin(mx, lot));
+   if(step<=0 || mn<=0 || mx<=0 || lot<mn) return 0;
+   lot = MathFloor(MathMin(mx,lot)/step + 1e-9) * step;
+   if(lot<mn) return 0;
    int digits = (int)MathMax(0, MathCeil(-MathLog10(step)));
    return NormalizeDouble(lot, digits);
 }
@@ -371,25 +371,27 @@ double CalcRiskPercent(bool triggerA, bool triggerB)
    return InpRiskPctTriggerA;
 }
 
-double CalcLotFromRisk(double riskPct, double atrDistanceUsd)
+double CalcLotFromRisk(double riskPct, int dir, double entryPrice, double stopPrice)
 {
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskMoney = balance * riskPct/100.0 * g_riskMultiplier;
-   double slPoints = atrDistanceUsd / g_pt;
-   if(slPoints<=0) return 0;
+   if(riskMoney<=0 || entryPrice<=0 || stopPrice<=0 || entryPrice==stopPrice) return 0;
 
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double valuePerPointPerLot;
-   if(tickSize>0) valuePerPointPerLot = tickValue/tickSize*g_pt;
-   else            valuePerPointPerLot = 1.0;
+   double projectedProfit = 0;
+   ENUM_ORDER_TYPE orderType = dir==1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(!OrderCalcProfit(orderType, _Symbol, 1.0, entryPrice, stopPrice, projectedProfit))
+   {
+      LogEvent(StringFormat("Entry skipped: OrderCalcProfit failed (%d)", GetLastError()));
+      return 0;
+   }
+   double lossPerLot = MathAbs(projectedProfit);
+   if(lossPerLot<=0) return 0;
 
-   double expected = 1.0;
-   if(MathAbs(valuePerPointPerLot-expected) > expected*0.5)
-      PrintFormat("WARNING: broker tick value/point (%.4f) diverges from the project's $1/point/lot convention. Verify contract size before trading live.", valuePerPointPerLot);
-
-   double lot = riskMoney / (slPoints*valuePerPointPerLot);
-   return NormLot(lot);
+   double rawLot = riskMoney/lossPerLot;
+   double lot = NormLotDown(rawLot);
+   if(lot<=0)
+      LogEvent(StringFormat("Entry skipped: required lot %.4f is below broker minimum", rawLot));
+   return lot;
 }
 
 //==================== ENTRY EXECUTION ====================
@@ -401,13 +403,6 @@ bool ExecuteEntry(int dir, double riskPct, string comment)
       LogEvent("Entry skipped: ATR unavailable/zero");
       return false;
    }
-   double lot = CalcLotFromRisk(riskPct, atrDist);
-   if(lot<=0)
-   {
-      LogEvent("Entry skipped: computed lot size is zero");
-      return false;
-   }
-
    // Real SL at ATR(14) M15 distance from entry (see file header - added after an
    // initial no-SL backtest measured -52% drawdown). TP is a real order too when
    // InpUseTp is on, at InpTpRrMultiple x the SL distance - added so winning trades
@@ -415,6 +410,8 @@ bool ExecuteEntry(int dir, double riskPct, string comment)
    // guard (floating profit was evaporating before a real exit ever happened).
    double entryPrice = dir==1 ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl = dir==1 ? entryPrice - atrDist : entryPrice + atrDist;
+   double lot = CalcLotFromRisk(riskPct, dir, entryPrice, sl);
+   if(lot<=0) return false;
    double tp = 0;
    if(InpUseTp)
    {
@@ -428,9 +425,11 @@ bool ExecuteEntry(int dir, double riskPct, string comment)
    else
       ok = trade.Sell(lot, _Symbol, 0, NormPrice(sl), tp>0?NormPrice(tp):0, comment);
 
-   if(!ok)
+   uint retcode = trade.ResultRetcode();
+   bool executed = ok && (retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL || retcode==TRADE_RETCODE_PLACED);
+   if(!executed)
    {
-      PrintFormat("ExecuteEntry failed: %s", trade.ResultRetcodeDescription());
+      PrintFormat("ExecuteEntry failed: retcode=%u %s", retcode, trade.ResultRetcodeDescription());
       return false;
    }
 
