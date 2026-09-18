@@ -589,7 +589,7 @@ bool IsInsideBrokerTradeSession(datetime t)
    return false;
 }
 
-void EnforceNoOvernightPositions()
+bool EnforceNoOvernightPositions()
 {
    MqlDateTime s;
    TimeToStruct(TimeCurrent(), s);
@@ -611,7 +611,9 @@ void EnforceNoOvernightPositions()
          LogEvent("Flattening - " + reason + " (additional safety net alongside the real SL)");
          CloseAllMyPositions();
       }
+      return true;
    }
+   return false;
 }
 
 // Peak-equity circuit breaker: unlike every other guardrail above (which rebuilds
@@ -750,9 +752,14 @@ void OnTick()
 {
    UpdateBarCaches();
 
-   EnforceNoOvernightPositions();
+   bool flattenBlocked = EnforceNoOvernightPositions();
 
    bool blocked = EvaluateDailyGuardrails();
+   if(flattenBlocked)
+   {
+      g_blockReason = "Market-close flatten window";
+      blocked = true;
+   }
    if(!blocked && g_newBarM5)
       TryFindAndExecuteEntry();
 
