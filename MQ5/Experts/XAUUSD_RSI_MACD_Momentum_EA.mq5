@@ -221,7 +221,9 @@ bool IsSwingLow(ENUM_TIMEFRAMES tf, int center, int n)
 
 void UpdateSwingList(ENUM_TIMEFRAMES tf, SwingPoint &list[], int cap)
 {
-   int center = InpSwingFractalN;
+   // Shift 0 is still forming. N+1 keeps the candidate and all N bars on
+   // its right-hand side closed before the swing is accepted.
+   int center = InpSwingFractalN + 1;
    if(IsSwingHigh(tf, center, InpSwingFractalN))
       AppendSwing(list, iTime(_Symbol,tf,center), iHigh(_Symbol,tf,center), true, cap);
    if(IsSwingLow(tf, center, InpSwingFractalN))
