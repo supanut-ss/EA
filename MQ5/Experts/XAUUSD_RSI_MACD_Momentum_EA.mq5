@@ -10,7 +10,7 @@
 //|                as Bias only - no countertrend divergence trades),|
 //|                both gated by a Bollinger Bands width filter that |
 //|                refuses to trade a squeezed/sideways market.      |
-//|  Confirm(M5):  a fresh MACD(7,26,9) cross in Bias's direction    |
+//|  Confirm(M1 default): a recent MACD(7,26,9) cross in Bias's      |
 //|                AND OBV agreeing with price's recent direction.   |
 //|                                                                    |
 //|  DELIBERATE v1 SCOPE - NOT AN OVERSIGHT:                          |
@@ -29,8 +29,8 @@
 //|   The session/Friday/weekend flatten guard below is an ADDITIONAL|
 //|     safety net (bounds overnight/weekend exposure), not the sole |
 //|     protection - the real SL/TP pair is the primary one.          |
-//|   - Max 1 concurrent position bounds worst-case exposure to a    |
-//|     single trade at a time.                                      |
+//|   - Concurrent positions are capped by InpMaxOpenPositions       |
+//|     (default 1) to bound aggregate exposure.                      |
 //|                                                                    |
 //|  Point convention matches the sibling XAUUSD_SMC_DayTrade_EA.mq5: |
 //|  1 point = $0.01 of XAUUSD price always (100 points = $1 move).  |
@@ -346,7 +346,7 @@ bool CheckRsiDivergenceTrigger(int dir, double &gapOut, int &newerIdxOut)
    }
 }
 
-//==================== CONFIRM (M5) ====================
+//==================== CONFIRM (CONFIGURABLE TF) ====================
 bool CheckMacdCrossConfirm(int dir, datetime &crossTimeOut)
 {
    crossTimeOut = 0;
