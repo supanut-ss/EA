@@ -22,6 +22,13 @@ Environment: Exness-MT5Trial8, XAUUSD, M1 Strategy Tester chart, USD 1,000 depos
 
 The out-of-sample trade count is too small for a live-readiness conclusion. Treat the EA as a backtest candidate and run longer walk-forward and demo-forward tests before operational use.
 
+The raw HTML reports remain in the local MT5 data folder and are not versioned in this repository:
+
+- `XAUUSD_RSI_MACD_Momentum_Candidate_InSample_Report.htm` — SHA-256 `71DD51DBB757EC47A50C38B648D5324E944FD46CE1C4C98283F79112CCBAFC64`
+- `XAUUSD_RSI_MACD_Momentum_Candidate_OutSample_Report.htm` — SHA-256 `54EBF90BE57868950ED2788991C65BEFCC75EFBE94E1A198F307F9E7A6D71593`
+
+This limits independent auditability from Git alone; rerun the committed configs to regenerate complete reports for another broker or data build.
+
 ## Rejected variants
 
 - RSI 15/85 and RSI 10/90 produced the same 49 divergence-only trades under the loose-filter test. Results were negative (`-$26.15`, PF `0.90` and `-$26.32`, PF `0.90`), so broadening RSI did not improve frequency or expectancy.
