@@ -776,8 +776,12 @@ int OnInit()
    if(_Digits!=2 && _Digits!=3)
       PrintFormat("WARNING: %s has %d decimal digits, unusual for gold - verify point conversion before trading.", _Symbol, _Digits);
 
-   if((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
-      Print("WARNING: account is not in Hedging mode; this EA is designed for a hedging account.");
+   ENUM_ACCOUNT_MARGIN_MODE marginMode = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   if(marginMode!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING && InpMaxOpenPositions>1)
+   {
+      Print("Invalid strategy input: netting accounts require InpMaxOpenPositions=1");
+      return INIT_PARAMETERS_INCORRECT;
+   }
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints((ulong)(InpSlippage*g_scale));
