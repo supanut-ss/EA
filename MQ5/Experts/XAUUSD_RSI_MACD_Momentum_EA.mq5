@@ -76,6 +76,7 @@ input double InpRsiExtremeHigh       = 85.0;      // RSI >= this qualifies a Sel
 input group "=== Trigger B - RSI Divergence (M15) ==="
 input int    InpSwingFractalN        = 2;         // Fractal bars each side (N)
 input double InpRsiDivergenceMinGap  = 5.0;       // Min RSI-point gap between the two swing points
+input int    InpDivergenceMaxAgeBars = 12;        // Newest swing expires after this many M15 bars
 
 input group "=== Confirm ==="
 input ENUM_TIMEFRAMES InpConfirmTF   = PERIOD_M1; // Confirm/entry-scan timeframe (MACD cross + OBV) - lower = more frequent scans
@@ -137,6 +138,8 @@ bool     g_newBarM5=false;
 datetime g_lastEntryConfirmTime=0;
 string   g_gvPeakEquityKey="";
 string   g_gvLastConfirmKey="";
+string   g_gvLastDivLowKey="", g_gvLastDivHighKey="";
+datetime g_lastUsedDivLowTime=0, g_lastUsedDivHighTime=0;
 
 SwingPoint g_swingsM15[];
 
@@ -298,9 +301,10 @@ double GetRsiAtTime(datetime t)
    return rsi[0];
 }
 
-bool CheckRsiDivergenceTrigger(int dir, double &gapOut)
+bool CheckRsiDivergenceTrigger(int dir, double &gapOut, int &newerIdxOut)
 {
    gapOut = 0;
+   newerIdxOut = -1;
    bool wantHigh = (dir==-1);
    int idxNewer=-1, idxOlder=-1;
    for(int i=ArraySize(g_swingsM15)-1; i>=0; i--)
@@ -311,6 +315,11 @@ bool CheckRsiDivergenceTrigger(int dir, double &gapOut)
       break;
    }
    if(idxNewer<0 || idxOlder<0) return false;
+   datetime newerTime = g_swingsM15[idxNewer].time;
+   datetime lastUsedTime = wantHigh ? g_lastUsedDivHighTime : g_lastUsedDivLowTime;
+   if(g_swingsM15[idxNewer].taken || newerTime==lastUsedTime) return false;
+   int newerShift = iBarShift(_Symbol, PERIOD_M15, newerTime, false);
+   if(newerShift<0 || newerShift>InpDivergenceMaxAgeBars) return false;
 
    double pOlder=g_swingsM15[idxOlder].price, pNewer=g_swingsM15[idxNewer].price;
    double rOlder=GetRsiAtTime(g_swingsM15[idxOlder].time), rNewer=GetRsiAtTime(g_swingsM15[idxNewer].time);
@@ -322,6 +331,7 @@ bool CheckRsiDivergenceTrigger(int dir, double &gapOut)
       double gap = rNewer - rOlder;        // higher low in RSI
       if(gap < InpRsiDivergenceMinGap) return false;
       gapOut = gap;
+      newerIdxOut = idxNewer;
       return true;
    }
    else
@@ -330,6 +340,7 @@ bool CheckRsiDivergenceTrigger(int dir, double &gapOut)
       double gap = rOlder - rNewer;        // lower high in RSI
       if(gap < InpRsiDivergenceMinGap) return false;
       gapOut = gap;
+      newerIdxOut = idxNewer;
       return true;
    }
 }
@@ -469,7 +480,8 @@ void TryFindAndExecuteEntry()
 
    bool triggerA = CheckRsiExtremeTrigger(bias);
    double gap=0;
-   bool triggerB = CheckRsiDivergenceTrigger(bias, gap);
+   int divergenceIdx=-1;
+   bool triggerB = CheckRsiDivergenceTrigger(bias, gap, divergenceIdx);
    if(!triggerA && !triggerB) { LogEvent("Skip: no trigger"); return; }
 
    datetime confirmTime=0;
@@ -483,6 +495,21 @@ void TryFindAndExecuteEntry()
    {
       g_lastEntryConfirmTime = confirmTime;
       GlobalVariableSet(g_gvLastConfirmKey, (double)confirmTime);
+      if(triggerB && divergenceIdx>=0)
+      {
+         g_swingsM15[divergenceIdx].taken = true;
+         datetime usedTime = g_swingsM15[divergenceIdx].time;
+         if(bias==1)
+         {
+            g_lastUsedDivLowTime = usedTime;
+            GlobalVariableSet(g_gvLastDivLowKey, (double)usedTime);
+         }
+         else
+         {
+            g_lastUsedDivHighTime = usedTime;
+            GlobalVariableSet(g_gvLastDivHighKey, (double)usedTime);
+         }
+      }
    }
 }
 
@@ -744,8 +771,14 @@ int OnInit()
 
    g_gvPeakEquityKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_PeakEquity";
    g_gvLastConfirmKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_LastConfirm";
+   g_gvLastDivLowKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_LastDivLow";
+   g_gvLastDivHighKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_LastDivHigh";
    if(GlobalVariableCheck(g_gvLastConfirmKey))
       g_lastEntryConfirmTime = (datetime)GlobalVariableGet(g_gvLastConfirmKey);
+   if(GlobalVariableCheck(g_gvLastDivLowKey))
+      g_lastUsedDivLowTime = (datetime)GlobalVariableGet(g_gvLastDivLowKey);
+   if(GlobalVariableCheck(g_gvLastDivHighKey))
+      g_lastUsedDivHighTime = (datetime)GlobalVariableGet(g_gvLastDivHighKey);
 
    hMacdH1   = iMACD(_Symbol, PERIOD_H1,  InpMacdFastEma, InpMacdSlowEma, InpMacdSignal, PRICE_CLOSE);
    hRsiM15   = iRSI(_Symbol, PERIOD_M15, InpRsiPeriod, PRICE_CLOSE);
