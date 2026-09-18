@@ -75,7 +75,7 @@ input double InpRsiExtremeHigh       = 90.0;      // RSI >= this qualifies a Sel
 
 input group "=== Trigger B - RSI Divergence (M15) ==="
 input int    InpSwingFractalN        = 2;         // Fractal bars each side (N)
-input double InpRsiDivergenceMinGap  = 5.0;       // Min RSI-point gap between the two swing points
+input double InpRsiDivergenceMinGap  = 3.0;       // Min RSI-point gap between the two swing points
 input int    InpDivergenceMaxAgeBars = 12;        // Newest swing expires after this many M15 bars
 
 input group "=== Confirm ==="
