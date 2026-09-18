@@ -640,7 +640,11 @@ bool IsInsideBrokerTradeSession(datetime t)
       if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)s.day_of_week, i, from, to)) break;
       int fromSec = (int)(from % 86400);
       int toSec   = (int)(to % 86400);
-      if(nowSec>=fromSec && nowSec<toSec) return true;
+      // Equal endpoints represent a full-day session; a lower end time
+      // represents a broker session that crosses midnight.
+      if(fromSec==toSec) return true;
+      if(fromSec<toSec && nowSec>=fromSec && nowSec<toSec) return true;
+      if(fromSec>toSec && (nowSec>=fromSec || nowSec<toSec)) return true;
    }
    return false;
 }
