@@ -54,7 +54,7 @@ CTrade trade;
 input group "=== General Settings ==="
 input ulong  InpMagicNumber          = 20260918;  // Magic Number
 input int    InpSlippage             = 30;        // Slippage (points, 0.01 USD units)
-input int    InpMaxOpenPositions     = 1;         // Max concurrent positions (single-position; reserved)
+input int    InpMaxOpenPositions     = 1;         // Max concurrent EA positions (hedging accounts)
 input int    InpMaxTradesPerDay      = 10;        // Daily entry cap
 
 input group "=== Bias (H1 MACD) ==="
@@ -472,7 +472,7 @@ bool ExecuteEntry(int dir, double riskPct, string comment)
 
 void TryFindAndExecuteEntry()
 {
-   if(CountOpenPositions()>0) return;
+   if(CountOpenPositions()>=MathMax(1,InpMaxOpenPositions)) return;
 
    int bias = GetH1Bias();
    if(bias==0) { LogEvent("Skip: H1 bias mixed"); return; }
