@@ -761,6 +761,16 @@ void UpdateDashboard()
 //==================== ENTRY POINTS ====================
 int OnInit()
 {
+   if(InpMaxOpenPositions<1 || InpMaxTradesPerDay<1 || InpSwingFractalN<1 ||
+      InpDivergenceMaxAgeBars<1 || InpMacdCrossLookback<1 || InpObvLookback<2 ||
+      InpAtrPeriod<1 || InpAtrSlMultiple<=0 || InpTpRrMultiple<=0 ||
+      InpRsiExtremeLow<=0 || InpRsiExtremeHigh>=100 || InpRsiExtremeLow>=InpRsiExtremeHigh ||
+      InpRiskPctTriggerA<=0 || InpRiskPctTriggerB<=0)
+   {
+      Print("Invalid strategy input: check position limits, lookbacks, RSI levels, ATR/TP multiples, and risk percentages");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
    g_pt    = 0.01;
    g_scale = g_pt/_Point;
    if(_Digits!=2 && _Digits!=3)
