@@ -428,6 +428,11 @@ double CalcLotFromRisk(double riskPct, int dir, double entryPrice, double stopPr
 }
 
 //==================== ENTRY EXECUTION ====================
+bool IsExecutedTradeRetcode(uint retcode)
+{
+   return retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL;
+}
+
 bool ExecuteEntry(int dir, double riskPct, string comment)
 {
    double atrDist = GetAtrVirtualDistance() * InpAtrSlMultiple;
@@ -459,7 +464,7 @@ bool ExecuteEntry(int dir, double riskPct, string comment)
       ok = trade.Sell(lot, _Symbol, 0, NormPrice(sl), tp>0?NormPrice(tp):0, comment);
 
    uint retcode = trade.ResultRetcode();
-   bool executed = ok && (retcode==TRADE_RETCODE_DONE || retcode==TRADE_RETCODE_DONE_PARTIAL || retcode==TRADE_RETCODE_PLACED);
+   bool executed = ok && IsExecutedTradeRetcode(retcode);
    if(!executed)
    {
       PrintFormat("ExecuteEntry failed: retcode=%u %s", retcode, trade.ResultRetcodeDescription());
@@ -536,17 +541,28 @@ int CountOpenPositions()
    return cnt;
 }
 
-void CloseAllMyPositions()
+bool CloseAllMyPositions()
 {
+   bool allClosed = true;
    for(int i=PositionsTotal()-1; i>=0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if(PositionSelectByTicket(ticket))
       {
          if(PositionGetString(POSITION_SYMBOL)==_Symbol && PositionGetInteger(POSITION_MAGIC)==(long)InpMagicNumber)
-            trade.PositionClose(ticket);
+         {
+            bool ok = trade.PositionClose(ticket);
+            uint retcode = trade.ResultRetcode();
+            if(!ok || retcode!=TRADE_RETCODE_DONE)
+            {
+               allClosed = false;
+               PrintFormat("PositionClose failed or incomplete: ticket=%I64u retcode=%u %s",
+                           ticket, retcode, trade.ResultRetcodeDescription());
+            }
+         }
       }
    }
+   return allClosed;
 }
 
 void GetTodayLossStats(int &lossesToday, double &realizedLossPctToday, int &consecutiveLosses, double &realizedProfitPctToday)
@@ -669,7 +685,8 @@ bool EnforceNoOvernightPositions()
       {
          string reason = brokerSessionClosed ? "broker session closed/break (unconditional)" : "session close / Friday cutoff / weekend guard";
          LogEvent("Flattening - " + reason + " (additional safety net alongside the real SL)");
-         CloseAllMyPositions();
+         if(!CloseAllMyPositions())
+            LogEvent("Flatten incomplete; retrying on the next tick");
       }
       return true;
    }
