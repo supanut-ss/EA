@@ -79,6 +79,7 @@ input double InpRsiDivergenceMinGap  = 5.0;       // Min RSI-point gap between t
 
 input group "=== Confirm ==="
 input ENUM_TIMEFRAMES InpConfirmTF   = PERIOD_M1; // Confirm/entry-scan timeframe (MACD cross + OBV) - lower = more frequent scans
+input int    InpMacdCrossLookback    = 3;         // Accept a MACD cross within this many closed confirm bars
 input int    InpObvLookback          = 3;         // Bars for OBV-vs-price direction check
 
 input group "=== Risk / Position Sizing ==="
@@ -133,6 +134,9 @@ int      hAtrM15=INVALID_HANDLE, hMacdM5=INVALID_HANDLE, hObvM5=INVALID_HANDLE;
 
 datetime g_lastBarM15=0, g_lastBarM5=0;
 bool     g_newBarM5=false;
+datetime g_lastEntryConfirmTime=0;
+string   g_gvPeakEquityKey="";
+string   g_gvLastConfirmKey="";
 
 SwingPoint g_swingsM15[];
 
@@ -331,16 +335,33 @@ bool CheckRsiDivergenceTrigger(int dir, double &gapOut)
 }
 
 //==================== CONFIRM (M5) ====================
-bool CheckMacdCrossConfirm(int dir)
+bool CheckMacdCrossConfirm(int dir, datetime &crossTimeOut)
 {
+   crossTimeOut = 0;
+   int lookback = MathMax(1, InpMacdCrossLookback);
    double main[], sig[];
    ArraySetAsSeries(main, true);
    ArraySetAsSeries(sig, true);
-   if(CopyBuffer(hMacdM5, 0, 1, 2, main) != 2) return false;
-   if(CopyBuffer(hMacdM5, 1, 1, 2, sig)  != 2) return false;
-   // main[0]/sig[0] = shift 1 (newest closed), main[1]/sig[1] = shift 2 (bar before)
-   if(dir==1)  return main[1]<=sig[1] && main[0]>sig[0];
-   return main[1]>=sig[1] && main[0]<sig[0];
+   int needed = lookback+1;
+   if(CopyBuffer(hMacdM5, 0, 1, needed, main) != needed) return false;
+   if(CopyBuffer(hMacdM5, 1, 1, needed, sig)  != needed) return false;
+
+   // The newest closed bar must still agree with the cross direction.
+   if(dir==1 && main[0]<=sig[0]) return false;
+   if(dir==-1 && main[0]>=sig[0]) return false;
+
+   for(int i=0; i<lookback; i++)
+   {
+      bool crossed = dir==1
+         ? (main[i+1]<=sig[i+1] && main[i]>sig[i])
+         : (main[i+1]>=sig[i+1] && main[i]<sig[i]);
+      if(crossed)
+      {
+         crossTimeOut = iTime(_Symbol, InpConfirmTF, i+1);
+         return crossTimeOut>0;
+      }
+   }
+   return false;
 }
 
 bool CheckObvConfirm(int dir)
@@ -451,12 +472,18 @@ void TryFindAndExecuteEntry()
    bool triggerB = CheckRsiDivergenceTrigger(bias, gap);
    if(!triggerA && !triggerB) { LogEvent("Skip: no trigger"); return; }
 
-   if(!CheckMacdCrossConfirm(bias)) { LogEvent("Skip: MACD cross confirm failed"); return; }
+   datetime confirmTime=0;
+   if(!CheckMacdCrossConfirm(bias, confirmTime)) { LogEvent("Skip: MACD cross confirm failed"); return; }
+   if(confirmTime==g_lastEntryConfirmTime) { LogEvent("Skip: MACD cross setup already traded"); return; }
    if(!CheckObvConfirm(bias))       { LogEvent("Skip: OBV confirm failed"); return; }
 
    double riskPct = CalcRiskPercent(triggerA, triggerB);
    string comment = (triggerA && triggerB) ? "RMB-AB" : (triggerB ? "RMB-B" : "RMB-A");
-   ExecuteEntry(bias, riskPct, comment);
+   if(ExecuteEntry(bias, riskPct, comment))
+   {
+      g_lastEntryConfirmTime = confirmTime;
+      GlobalVariableSet(g_gvLastConfirmKey, (double)confirmTime);
+   }
 }
 
 //==================== DAILY GUARDRAILS / FILTERS ====================
@@ -623,8 +650,6 @@ bool EnforceNoOvernightPositions()
 // GlobalVariable, restart-safe) and blocks new entries once equity has fallen too
 // far below that peak - catching a slow bleed across many separate days that no
 // single day's own loss-stop would ever trip on its own.
-string g_gvPeakEquityKey = "";
-
 double GetPeakEquity()
 {
    double curEquity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -718,6 +743,9 @@ int OnInit()
    trade.SetAsyncMode(false);
 
    g_gvPeakEquityKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_PeakEquity";
+   g_gvLastConfirmKey = "RMB_" + IntegerToString((long)InpMagicNumber) + "_" + _Symbol + "_LastConfirm";
+   if(GlobalVariableCheck(g_gvLastConfirmKey))
+      g_lastEntryConfirmTime = (datetime)GlobalVariableGet(g_gvLastConfirmKey);
 
    hMacdH1   = iMACD(_Symbol, PERIOD_H1,  InpMacdFastEma, InpMacdSlowEma, InpMacdSignal, PRICE_CLOSE);
    hRsiM15   = iRSI(_Symbol, PERIOD_M15, InpRsiPeriod, PRICE_CLOSE);
