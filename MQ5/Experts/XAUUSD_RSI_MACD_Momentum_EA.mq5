@@ -80,7 +80,7 @@ input int    InpDivergenceMaxAgeBars = 12;        // Newest swing expires after 
 
 input group "=== Confirm ==="
 input ENUM_TIMEFRAMES InpConfirmTF   = PERIOD_M1; // Confirm/entry-scan timeframe (MACD cross + OBV) - lower = more frequent scans
-input int    InpMacdCrossLookback    = 3;         // Accept a MACD cross within this many closed confirm bars
+input int    InpMacdCrossLookback    = 1;         // Accept a MACD cross within this many closed confirm bars
 input int    InpObvLookback          = 3;         // Bars for OBV-vs-price direction check
 
 input group "=== Risk / Position Sizing ==="
@@ -89,7 +89,7 @@ input double InpRiskPctTriggerB      = 1.0;       // Risk % - Trigger B only, or
 input int    InpAtrPeriod            = 14;        // ATR period (M15) - SL distance
 input double InpAtrSlMultiple        = 1.0;       // SL distance = M15 ATR x this multiple
 input bool   InpUseTp                = true;      // Send a real TP order (lets profit actually get measured/locked in instead of only SL/flatten)
-input double InpTpRrMultiple         = 2.0;       // TP distance = SL distance (ATR) x this multiple
+input double InpTpRrMultiple         = 2.5;       // TP distance = SL distance (ATR) x this multiple
 
 input group "=== Risk Management / Daily Guardrails ==="
 input double InpDailyLossStopPct     = 3.0;       // Stop new entries after this % realized loss
