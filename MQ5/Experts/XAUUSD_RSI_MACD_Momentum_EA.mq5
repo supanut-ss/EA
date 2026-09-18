@@ -5,7 +5,7 @@
 //|            trailing/partial-close/runner management yet.         |
 //|                                                                    |
 //|  Bias   (H1):  MACD(7,26,9) line/signal/histogram all agree.     |
-//|  Trigger(M15): RSI(7) extreme (<=15 / >=85) OR RSI divergence    |
+//|  Trigger(M15): RSI(7) extreme (<=10 / >=90) OR RSI divergence    |
 //|                vs the last two M15 swing points (same direction  |
 //|                as Bias only - no countertrend divergence trades),|
 //|                both gated by a Bollinger Bands width filter that |
@@ -70,8 +70,8 @@ input double InpBbWidthSqueezePct    = 50.0;      // Min % of trailing avg BB wi
 
 input group "=== Trigger A - RSI Extreme (M15) ==="
 input int    InpRsiPeriod            = 7;         // RSI period (shared: trigger + divergence)
-input double InpRsiExtremeLow        = 15.0;      // RSI <= this qualifies a Buy
-input double InpRsiExtremeHigh       = 85.0;      // RSI >= this qualifies a Sell
+input double InpRsiExtremeLow        = 10.0;      // RSI <= this qualifies a Buy
+input double InpRsiExtremeHigh       = 90.0;      // RSI >= this qualifies a Sell
 
 input group "=== Trigger B - RSI Divergence (M15) ==="
 input int    InpSwingFractalN        = 2;         // Fractal bars each side (N)
