@@ -87,6 +87,7 @@ input group "=== Risk / Position Sizing ==="
 input double InpRiskPctTriggerA      = 0.5;       // Risk % - Trigger A only (RSI extreme)
 input double InpRiskPctTriggerB      = 1.0;       // Risk % - Trigger B only, or A+B together
 input int    InpAtrPeriod            = 14;        // ATR period (M15) - SL distance
+input double InpAtrSlMultiple        = 1.0;       // SL distance = M15 ATR x this multiple
 input bool   InpUseTp                = true;      // Send a real TP order (lets profit actually get measured/locked in instead of only SL/flatten)
 input double InpTpRrMultiple         = 2.0;       // TP distance = SL distance (ATR) x this multiple
 
@@ -429,7 +430,7 @@ double CalcLotFromRisk(double riskPct, int dir, double entryPrice, double stopPr
 //==================== ENTRY EXECUTION ====================
 bool ExecuteEntry(int dir, double riskPct, string comment)
 {
-   double atrDist = GetAtrVirtualDistance();
+   double atrDist = GetAtrVirtualDistance() * InpAtrSlMultiple;
    if(atrDist<=0)
    {
       LogEvent("Entry skipped: ATR unavailable/zero");
