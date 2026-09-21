@@ -69,7 +69,11 @@ input int      InpLoserCutSideCount    = 2;       // Rule A: close everything on
 input int      InpLoserCutMoveCents    = 150;     // ...and price runs this far past that side's newest (highest-level) entry
 input int      InpSlBufferCents        = 20;      // Rule B: SL = winning side's level-1 price + this, in the protective direction
 input int      InpTpBufferCents        = 100;     // Rule B: TP = a further winning-side level price + this, in the favorable direction
+input int      InpRule30TpBufferCents  = 50;      // Rule B 3-0 only: initial TP = level 4 + this, until price reaches level 4 and it moves out to level 5 exactly
 input int      InpRule31Level4CloseCents = 700;   // Rule B 3-1: level 4's own pending stays live, but once price runs this far past it, force it closed/cancelled together with the rest
+input int      InpRule31Level4SlLockCents = 100;  // Rule B 3-1: once level 4 actually fills, SL tightens to level 4 + this, in the adverse direction - locking in a small guaranteed profit instead of retreating all the way to level 2
+input int      InpRule32Level4SlLockCents = 100;  // Rule B 3-2: once level 4 actually fills, SL tightens to level 4 + this, in the adverse direction
+input int      InpRule32Level5SlLockCents = 100;  // Rule B 3-2: once level 5 actually fills, SL tightens to level 5 + this, in the adverse direction
 input int      InpRule32Level5CloseCents = 900;   // Rule B 3-2: level 5's own pending stays live, but once price runs this far past it, force it closed/cancelled together with the rest
 
 input group "=== Execution Safety ==="
@@ -116,6 +120,7 @@ struct CloseBasket
    int    direction;       // the manual entry's own direction (1 = Buy, -1 = Sell)
    bool   rule30Applied;   // Rule B's 3-0 pending-cancellation has already run once for this basket
    bool   rule30SlArmed;   // Rule B's 3-0 SL-to-level3 move has already fired once for this basket
+   bool   rule30TpArmed;   // Rule B's 3-0 TP-to-level5 move has already fired once for this basket
    bool   rule31Applied;   // Rule B's 3-1 losing-side pending-cancellation has already run once for this basket
    bool   rule32Applied;   // Rule B's 3-2 losing-side pending-cancellation has already run once for this basket
    bool   rule31Level4Failsafe;   // Rule B's 3-1 level-4 overflow failsafe has already fired once for this basket
@@ -1160,6 +1165,7 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].direction = direction;
    g_closeBaskets[size].rule30Applied = false;
    g_closeBaskets[size].rule30SlArmed = false;
+   g_closeBaskets[size].rule30TpArmed = false;
    g_closeBaskets[size].rule31Applied = false;
    g_closeBaskets[size].rule32Applied = false;
    g_closeBaskets[size].rule31Level4Failsafe = false;
@@ -1631,21 +1637,24 @@ void ApplyRuleB(CloseBasket &basket)
            }
         }
       // Once level 4 has actually filled (a genuine 4th winning position,
-      // not just its pending still waiting), tighten every winning position's
-      // SL to level 2 to lock in more of the extra distance covered - armed
+      // not just its pending still waiting), tighten every winning
+      // position's SL to level 4 + InpRule31Level4SlLockCents (adverse
+      // direction) - close enough to level 4 to lock in a small guaranteed
+      // profit instead of retreating all the way back to level 2 - armed
       // once, held forever, same convention as 3-0's and 3-2's own SL arms.
       // The losing side's cross-wired mirror moves with it, so both sides
       // still close together at whichever line is touched first.
       if(basket.rule31Applied && !basket.rule31Level4SlArmed &&
          CountSidePositions(basket, liveWinDirection) >= 4)
         {
-         double armedSl = LevelPrice(basket, liveWinDirection, 2);
-         double level4Tp = LevelPrice(basket, liveWinDirection, 4) + liveWinDirection * (InpTpBufferCents / 100.0);
+         double level4 = LevelPrice(basket, liveWinDirection, 4);
+         double armedSl = level4 - liveWinDirection * (InpRule31Level4SlLockCents / 100.0);
+         double level4Tp = level4 + liveWinDirection * (InpTpBufferCents / 100.0);
          ApplySideSLTP(basket, liveWinDirection, armedSl, level4Tp);
          if(CountSidePositions(basket, -liveWinDirection) > 0)
             ApplySideSLTP(basket, -liveWinDirection, level4Tp, armedSl);
          Print("OneClickGrid: RULE B 3-1 level-4 filled #", basket.rootOrderTicket,
-               " | tightening SL to level 2 for every winning position");
+               " | tightening SL to level 4 + ", InpRule31Level4SlLockCents, " cents for every winning position");
          basket.rule31Level4SlArmed = true;
          SavePersistentState();
         }
@@ -1679,33 +1688,38 @@ void ApplyRuleB(CloseBasket &basket)
            }
         }
       // 3-2's SL tightens in two fill-count-triggered stages, each armed
-      // once and held forever: level 2+buffer once level 4 actually fills,
-      // then level 3+buffer once level 5 does too - the losing side's
+      // once and held forever: level 4 + InpRule32Level4SlLockCents (adverse
+      // direction) once level 4 actually fills, then level 5 +
+      // InpRule32Level5SlLockCents once level 5 does too - each locks in a
+      // small guaranteed profit right next to the level that just filled,
+      // instead of retreating back to level 2/3. The losing side's
       // cross-wired mirror moves with each stage so both sides still close
       // together at whichever line is touched first.
       if(basket.rule32Applied && !basket.rule32Level4SlArmed &&
          CountSidePositions(basket, liveWinDirection) >= 4)
         {
-         double armedSl = LevelPrice(basket, liveWinDirection, 2) + liveWinDirection * (InpSlBufferCents / 100.0);
+         double level4 = LevelPrice(basket, liveWinDirection, 4);
+         double armedSl = level4 - liveWinDirection * (InpRule32Level4SlLockCents / 100.0);
          double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
          ApplySideSLTP(basket, liveWinDirection, armedSl, level5Tp);
          if(CountSidePositions(basket, -liveWinDirection) > 0)
             ApplySideSLTP(basket, -liveWinDirection, level5Tp, armedSl);
          Print("OneClickGrid: RULE B 3-2 level-4 filled #", basket.rootOrderTicket,
-               " | tightening SL to level 2 + buffer for every winning position");
+               " | tightening SL to level 4 + ", InpRule32Level4SlLockCents, " cents for every winning position");
          basket.rule32Level4SlArmed = true;
          SavePersistentState();
         }
       if(basket.rule32Applied && !basket.rule32Level5SlArmed &&
          CountSidePositions(basket, liveWinDirection) >= 5)
         {
-         double armedSl = LevelPrice(basket, liveWinDirection, 3) + liveWinDirection * (InpSlBufferCents / 100.0);
-         double level5Tp = LevelPrice(basket, liveWinDirection, 5) + liveWinDirection * (InpTpBufferCents / 100.0);
+         double level5 = LevelPrice(basket, liveWinDirection, 5);
+         double armedSl = level5 - liveWinDirection * (InpRule32Level5SlLockCents / 100.0);
+         double level5Tp = level5 + liveWinDirection * (InpTpBufferCents / 100.0);
          ApplySideSLTP(basket, liveWinDirection, armedSl, level5Tp);
          if(CountSidePositions(basket, -liveWinDirection) > 0)
             ApplySideSLTP(basket, -liveWinDirection, level5Tp, armedSl);
          Print("OneClickGrid: RULE B 3-2 level-5 filled #", basket.rootOrderTicket,
-               " | tightening SL to level 3 + buffer for every winning position");
+               " | tightening SL to level 5 + ", InpRule32Level5SlLockCents, " cents for every winning position");
          basket.rule32Level5SlArmed = true;
          SavePersistentState();
         }
@@ -1739,26 +1753,38 @@ void ApplyRuleB(CloseBasket &basket)
       // 3-0: starting SL/TP bracket, set once - and at that same moment
       // the basket's shape is locked to exactly these 3 positions, since
       // no further level can ever fill once their pendings (both sides)
-      // are gone. The SL still arms tighter afterward: once price runs
-      // InpTpBufferCents past level3, it moves from level1+buffer to
-      // level3 exactly, once, and holds there even if price retreats.
+      // are gone. Both SL and TP arm tighter/further afterward, each once,
+      // holding from there even if price retreats: SL moves from
+      // level1+buffer to level3 exactly once price runs InpTpBufferCents
+      // past level3; TP moves from level4+InpRule30TpBufferCents out to
+      // level5 exactly once price reaches level4.
       sl = LevelPrice(basket, winDirection, 1) + winDirection * slBuffer;
-      tp = LevelPrice(basket, winDirection, 5);
+      tp = LevelPrice(basket, winDirection, 4) + winDirection * (InpRule30TpBufferCents / 100.0);
       matched = true;
       retirePendingsNow = !basket.rule30Applied;
 
       double level3 = LevelPrice(basket, winDirection, 3);
-      double armTrigger = level3 + winDirection * tpBuffer;
+      double slArmTrigger = level3 + winDirection * tpBuffer;
       double armReference = (winDirection == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                                  : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      bool reachedArm = (winDirection == 1) ? (armReference >= armTrigger) : (armReference <= armTrigger);
-      if(reachedArm && !basket.rule30SlArmed)
+      bool reachedSlArm = (winDirection == 1) ? (armReference >= slArmTrigger) : (armReference <= slArmTrigger);
+      if(reachedSlArm && !basket.rule30SlArmed)
         {
          basket.rule30SlArmed = true;
          SavePersistentState();
         }
       if(basket.rule30SlArmed)
          sl = level3;
+
+      double level4 = LevelPrice(basket, winDirection, 4);
+      bool reachedTpArm = (winDirection == 1) ? (armReference >= level4) : (armReference <= level4);
+      if(reachedTpArm && !basket.rule30TpArmed)
+        {
+         basket.rule30TpArmed = true;
+         SavePersistentState();
+        }
+      if(basket.rule30TpArmed)
+         tp = LevelPrice(basket, winDirection, 5);
      }
    else if(winCount == 3 && loseCount == 1)
      {
@@ -1940,7 +1966,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12"};
+   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12","R13"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -1975,6 +2001,7 @@ void SavePersistentState(const bool forceFlush = true)
       WriteStateValue(BasketStateKey(i, "R10"), g_closeBaskets[i].rule32Level5TpSet ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R11"), g_closeBaskets[i].rule32Level4SlArmed ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R12"), g_closeBaskets[i].rule32Level5SlArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R13"), g_closeBaskets[i].rule30TpArmed ? 1.0 : 0.0);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
       DeleteBasketStateSlot(i);
@@ -2035,7 +2062,7 @@ void LoadPersistentBaskets()
         {
          double r0Value = 0.0, r1Value = 0.0, r3Value = 0.0, r4Value = 0.0;
          double r5Value = 0.0, r6Value = 0.0, r7Value = 0.0, r8Value = 0.0;
-         double r9Value = 0.0, r10Value = 0.0, r11Value = 0.0, r12Value = 0.0;
+         double r9Value = 0.0, r10Value = 0.0, r11Value = 0.0, r12Value = 0.0, r13Value = 0.0;
          if(ReadStateValue(BasketStateKey(i, "R0"), r0Value) && r0Value > 0.5)
             g_closeBaskets[index].rule30Applied = true;
          if(ReadStateValue(BasketStateKey(i, "R1"), r1Value) && r1Value > 0.5)
@@ -2060,6 +2087,8 @@ void LoadPersistentBaskets()
             g_closeBaskets[index].rule32Level4SlArmed = true;
          if(ReadStateValue(BasketStateKey(i, "R12"), r12Value) && r12Value > 0.5)
             g_closeBaskets[index].rule32Level5SlArmed = true;
+         if(ReadStateValue(BasketStateKey(i, "R13"), r13Value) && r13Value > 0.5)
+            g_closeBaskets[index].rule30TpArmed = true;
         }
      }
   }
