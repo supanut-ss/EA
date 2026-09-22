@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                   XAUUSD_OneClick_StopGrid_EA_V2.mq5              |
 //|  A ground-up, count-based exit design built on the OpenOnly       |
 //|  opening path (XAUUSD_OneClick_StopGrid_EA_OpenOnly.mq5). Exit    |
@@ -121,6 +121,16 @@ struct CloseBasket
    bool   rule32Level5TpSet;      // Rule B's 3-2 level-5 pending TP has already been set once for this basket
    bool   rule32Level4SlArmed;    // Rule B's 3-2 level-4 SL-to-level2+buffer tightening has already fired once for this basket
    bool   rule32Level5SlArmed;    // Rule B's 3-2 level-5 SL-to-level3+buffer tightening has already fired once for this basket
+   // The exact SL/TP Rule B last asked each side to hold, 0 until it sets
+   // one. Kept so the bracket can be re-asserted on later ticks: the
+   // win/loss table only defines four (win, lose) combinations, so the
+   // moment one of the three winners closes, the survivors fall into an
+   // unlisted combination ApplyRuleB returns from without touching, and
+   // anything a rejected modify left behind would stay wrong for good.
+   double lockedBuySl;
+   double lockedBuyTp;
+   double lockedSellSl;
+   double lockedSellTp;
   };
 CloseBasket g_closeBaskets[];
 
@@ -1006,6 +1016,10 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].rule32Level5TpSet = false;
    g_closeBaskets[size].rule32Level4SlArmed = false;
    g_closeBaskets[size].rule32Level5SlArmed = false;
+   g_closeBaskets[size].lockedBuySl = 0.0;
+   g_closeBaskets[size].lockedBuyTp = 0.0;
+   g_closeBaskets[size].lockedSellSl = 0.0;
+   g_closeBaskets[size].lockedSellTp = 0.0;
    return(true);
   }
 
@@ -1407,11 +1421,75 @@ bool CheckAndApplyLoserCut(const CloseBasket &basket)
   }
 
 //+------------------------------------------------------------------+
-void ApplySideSLTP(const CloseBasket &basket, const int direction, const double slPrice, const double tpPrice)
+// Records the bracket Rule B just asked one side to hold, so later ticks
+// can re-assert it (see EnforceLockedBrackets). Persisted as soon as it
+// changes, since a restart in between would otherwise leave the basket
+// with no record of what its own positions are supposed to be holding.
+void RememberSideBracket(CloseBasket &basket, const int direction, const double slPrice, const double tpPrice)
+  {
+   bool changed;
+   if(direction == 1)
+     {
+      changed = (basket.lockedBuySl != slPrice || basket.lockedBuyTp != tpPrice);
+      basket.lockedBuySl = slPrice;
+      basket.lockedBuyTp = tpPrice;
+     }
+   else
+     {
+      changed = (basket.lockedSellSl != slPrice || basket.lockedSellTp != tpPrice);
+      basket.lockedSellSl = slPrice;
+      basket.lockedSellTp = tpPrice;
+     }
+   if(changed)
+      SavePersistentState();
+  }
+
+//+------------------------------------------------------------------+
+// A modify rejected with "invalid stops" because price has ALREADY run
+// past the level being asked for leaves that position sitting on its
+// previous, looser bracket - exactly the state the new level was meant to
+// replace, and one nothing else would ever correct, since a retry is
+// rejected the same way for as long as price stays past it. Closing at
+// market right there produces the same exit the rejected SL/TP would
+// have: the level has been reached, only the broker never got to act on
+// it. Every other rejection - a level too close to market, a requote - is
+// left for the next tick to retry, so this never fires on a bracket that
+// is merely unacceptable rather than overtaken.
+bool CloseIfBracketAlreadyPassed(const ulong ticket, const int direction, const double sl, const double tp)
+  {
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0.0 || ask <= 0.0)
+      return(false);
+
+   // The side of the book this position would actually be closed on.
+   double exitPrice = (direction == 1) ? bid : ask;
+   bool slPassed = (sl > 0.0) && ((direction == 1) ? (exitPrice <= sl) : (exitPrice >= sl));
+   bool tpPassed = (tp > 0.0) && ((direction == 1) ? (exitPrice >= tp) : (exitPrice <= tp));
+   if(!slPassed && !tpPassed)
+      return(false);
+
+   if(!trade.PositionClose(ticket, InpSlippagePoints) || trade.ResultRetcode() != TRADE_RETCODE_DONE)
+     {
+      Print("OneClickGrid: RULE B overtaken-bracket close failed #", ticket, " | ",
+            trade.ResultRetcodeDescription(), " | it is retried on the following ticks");
+      return(false);
+     }
+
+   Print("OneClickGrid: RULE B closed #", ticket, " at market | price ",
+         DoubleToString(exitPrice, _Digits), " is already past the ", (slPassed ? "SL" : "TP"),
+         " the broker rejected (", DoubleToString(slPassed ? sl : tp, _Digits), ")");
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void ApplySideSLTP(CloseBasket &basket, const int direction, const double slPrice, const double tpPrice)
   {
    ENUM_POSITION_TYPE posType = (direction == 1) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    double normSl = NormalizePriceForDirection(slPrice, -direction);
    double normTp = NormalizePriceForDirection(tpPrice, direction);
+
+   RememberSideBracket(basket, direction, slPrice, tpPrice);
 
    for(int i=PositionsTotal()-1; i>=0; i--)
      {
@@ -1429,11 +1507,31 @@ void ApplySideSLTP(const CloseBasket &basket, const int direction, const double 
       bool sent = trade.PositionModify(ticket, normSl, normTp);
       uint retcode = trade.ResultRetcode();
       if(!sent || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_DONE_PARTIAL))
+        {
          Print("OneClickGrid: RULE B SL/TP modify failed #", ticket, " | ", trade.ResultRetcodeDescription());
+         if(retcode == TRADE_RETCODE_INVALID_STOPS)
+            CloseIfBracketAlreadyPassed(ticket, direction, normSl, normTp);
+        }
       else
          Print("OneClickGrid: RULE B set #", ticket, " -> SL=", DoubleToString(normSl, _Digits),
                " TP=", DoubleToString(normTp, _Digits));
      }
+  }
+
+//+------------------------------------------------------------------+
+// Re-asserts the bracket Rule B last asked for, every tick, for as long
+// as the basket still holds positions on that side. ApplySideSLTP skips
+// any position already holding those exact prices, so in the normal case
+// this sends nothing at all - it only ever acts on one that missed its
+// bracket (a modify rejected on a requote, or one that raced a price move
+// which closed the others first), which is precisely the position the
+// win/loss table can no longer reach.
+void EnforceLockedBrackets(CloseBasket &basket)
+  {
+   if((basket.lockedBuySl > 0.0 || basket.lockedBuyTp > 0.0) && CountSidePositions(basket, 1) > 0)
+      ApplySideSLTP(basket, 1, basket.lockedBuySl, basket.lockedBuyTp);
+   if((basket.lockedSellSl > 0.0 || basket.lockedSellTp > 0.0) && CountSidePositions(basket, -1) > 0)
+      ApplySideSLTP(basket, -1, basket.lockedSellSl, basket.lockedSellTp);
   }
 
 //+------------------------------------------------------------------+
@@ -1702,6 +1800,14 @@ void ManageExitRules()
         }
       ApplyRuleB(g_closeBaskets[b]);
 
+      // Rule B's own table stops short of the stragglers: it defines only
+      // four (win, lose) combinations, so from the tick one of the three
+      // winners closes, the positions still open no longer match anything
+      // in it. Re-asserting the last bracket it asked for keeps those on
+      // the same two price lines they were locked in with, instead of
+      // whatever looser SL/TP a rejected modify left them holding.
+      EnforceLockedBrackets(g_closeBaskets[b]);
+
       // Once Rule B has locked this basket into any of its covered cases
       // (3-0/3-1/3-2) it already has its own SL/TP bracket - plus, for 3-1/
       // 3-2, its own staged tightening and overflow failsafe - managing the
@@ -1788,7 +1894,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12","R13"};
+   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12","R13","R14","R15","R16","R17"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -1823,6 +1929,10 @@ void SavePersistentState(const bool forceFlush = true)
       WriteStateValue(BasketStateKey(i, "R10"), g_closeBaskets[i].rule32Level5TpSet ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R11"), g_closeBaskets[i].rule32Level4SlArmed ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R12"), g_closeBaskets[i].rule32Level5SlArmed ? 1.0 : 0.0);
+      WriteStateValue(BasketStateKey(i, "R14"), g_closeBaskets[i].lockedBuySl);
+      WriteStateValue(BasketStateKey(i, "R15"), g_closeBaskets[i].lockedBuyTp);
+      WriteStateValue(BasketStateKey(i, "R16"), g_closeBaskets[i].lockedSellSl);
+      WriteStateValue(BasketStateKey(i, "R17"), g_closeBaskets[i].lockedSellTp);
       WriteStateValue(BasketStateKey(i, "R13"), g_closeBaskets[i].rule30TpArmed ? 1.0 : 0.0);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
@@ -1909,6 +2019,15 @@ void LoadPersistentBaskets()
             g_closeBaskets[index].rule32Level4SlArmed = true;
          if(ReadStateValue(BasketStateKey(i, "R12"), r12Value) && r12Value > 0.5)
             g_closeBaskets[index].rule32Level5SlArmed = true;
+         double lockedValue = 0.0;
+         if(ReadStateValue(BasketStateKey(i, "R14"), lockedValue))
+            g_closeBaskets[index].lockedBuySl = lockedValue;
+         if(ReadStateValue(BasketStateKey(i, "R15"), lockedValue))
+            g_closeBaskets[index].lockedBuyTp = lockedValue;
+         if(ReadStateValue(BasketStateKey(i, "R16"), lockedValue))
+            g_closeBaskets[index].lockedSellSl = lockedValue;
+         if(ReadStateValue(BasketStateKey(i, "R17"), lockedValue))
+            g_closeBaskets[index].lockedSellTp = lockedValue;
          if(ReadStateValue(BasketStateKey(i, "R13"), r13Value) && r13Value > 0.5)
             g_closeBaskets[index].rule30TpArmed = true;
         }
