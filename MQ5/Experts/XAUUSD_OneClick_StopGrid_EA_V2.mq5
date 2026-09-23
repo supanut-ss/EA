@@ -63,6 +63,7 @@ input int      InpLoserCutMoveCents    = 150;     // ...and price runs this far 
 input int      InpSlBufferCents        = 20;      // Rule B: SL = winning side's level-1 price + this, in the protective direction
 input int      InpTpBufferCents        = 100;     // Rule B: TP = a further winning-side level price + this, in the favorable direction
 input int      InpRule30TpBufferCents  = 50;      // Rule B 3-0 only: initial TP = level 4 + this, until price reaches level 4 and it moves out to level 5 exactly
+input int      InpRule30Level4SlLockCents = 100;  // Rule B 3-0: once price reaches level 4, SL tightens to level 4 + this, in the adverse direction - same lock convention as 3-1/3-2's own level-4 SL lock
 input int      InpRule31Level4CloseCents = 700;   // Rule B 3-1: level 4's own pending stays live, but once price runs this far past it, force it closed/cancelled together with the rest
 input int      InpRule31Level4SlLockCents = 100;  // Rule B 3-1: once level 4 actually fills, SL tightens to level 4 + this, in the adverse direction - locking in a small guaranteed profit instead of retreating all the way to level 2
 input int      InpRule32Level4SlLockCents = 100;  // Rule B 3-2: once level 4 actually fills, SL tightens to level 4 + this, in the adverse direction
@@ -114,6 +115,7 @@ struct CloseBasket
    bool   rule30Applied;   // Rule B's 3-0 pending-cancellation has already run once for this basket
    bool   rule30SlArmed;   // Rule B's 3-0 SL-to-level3 move has already fired once for this basket
    bool   rule30TpArmed;   // Rule B's 3-0 TP-to-level5 move has already fired once for this basket
+   bool   rule30Level4SlArmed;   // Rule B's 3-0 SL-to-(level4 - lock) move has already fired once for this basket
    bool   rule31Applied;   // Rule B's 3-1 losing-side pending-cancellation has already run once for this basket
    bool   rule32Applied;   // Rule B's 3-2 losing-side pending-cancellation has already run once for this basket
    bool   rule31Level4Failsafe;   // Rule B's 3-1 level-4 overflow failsafe has already fired once for this basket
@@ -1023,6 +1025,7 @@ bool AddCloseBasket(const ulong rootOrderTicket,
    g_closeBaskets[size].lockedBuyTp = 0.0;
    g_closeBaskets[size].lockedSellSl = 0.0;
    g_closeBaskets[size].lockedSellTp = 0.0;
+   g_closeBaskets[size].rule30Level4SlArmed = false;
    return(true);
   }
 
@@ -1716,6 +1719,22 @@ void ApplyRuleB(CloseBasket &basket)
         }
       if(basket.rule30TpArmed)
          tp = LevelPrice(basket, winDirection, 5);
+
+      // Once price has run all the way out to level 4 - the same
+      // theoretical price 3-1/3-2 uses as an actual fill, here reached
+      // purely on price since 3-0's own level-4 pending was already
+      // cancelled - SL tightens to level 4 - InpRule30Level4SlLockCents,
+      // the same lock-near-the-level convention as 3-1/3-2's own level-4
+      // SL lock. Armed once, held forever; overrides the level-3 SL arm
+      // above once it fires.
+      bool reachedLevel4SlArm = reachedTpArm;
+      if(reachedLevel4SlArm && !basket.rule30Level4SlArmed)
+        {
+         basket.rule30Level4SlArmed = true;
+         SavePersistentState();
+        }
+      if(basket.rule30Level4SlArmed)
+         sl = level4 - winDirection * (InpRule30Level4SlLockCents / 100.0);
      }
    else if(winCount == 3 && loseCount == 1)
      {
@@ -1905,7 +1924,7 @@ bool ReadStateUlong(const string keyBase, ulong &value)
 //+------------------------------------------------------------------+
 void DeleteBasketStateSlot(const int index)
   {
-   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12","R13","R14","R15","R16","R17"};
+   string fields[] = {"RH","RL","MH","ML","T","P","N","R0","R1","R2","R3","R4","R5","R6","R7","R8","R9","R10","R11","R12","R13","R14","R15","R16","R17","R18"};
    for(int i=0; i<ArraySize(fields); i++)
       GlobalVariableDel(BasketStateKey(index, fields[i]));
   }
@@ -1944,6 +1963,7 @@ void SavePersistentState(const bool forceFlush = true)
       WriteStateValue(BasketStateKey(i, "R15"), g_closeBaskets[i].lockedBuyTp);
       WriteStateValue(BasketStateKey(i, "R16"), g_closeBaskets[i].lockedSellSl);
       WriteStateValue(BasketStateKey(i, "R17"), g_closeBaskets[i].lockedSellTp);
+      WriteStateValue(BasketStateKey(i, "R18"), g_closeBaskets[i].rule30Level4SlArmed ? 1.0 : 0.0);
       WriteStateValue(BasketStateKey(i, "R13"), g_closeBaskets[i].rule30TpArmed ? 1.0 : 0.0);
      }
    for(int i=basketCount; i<oldBasketCount && i<MAX_TRACKED_BASKETS; i++)
@@ -2039,6 +2059,9 @@ void LoadPersistentBaskets()
             g_closeBaskets[index].lockedSellSl = lockedValue;
          if(ReadStateValue(BasketStateKey(i, "R17"), lockedValue))
             g_closeBaskets[index].lockedSellTp = lockedValue;
+         double r18Value = 0.0;
+         if(ReadStateValue(BasketStateKey(i, "R18"), r18Value) && r18Value > 0.5)
+            g_closeBaskets[index].rule30Level4SlArmed = true;
          if(ReadStateValue(BasketStateKey(i, "R13"), r13Value) && r13Value > 0.5)
             g_closeBaskets[index].rule30TpArmed = true;
         }
