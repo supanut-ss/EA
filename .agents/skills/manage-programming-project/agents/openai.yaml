@@ -1,6 +1,6 @@
 interface:
-  display_name: Sol Project Leader
-  short_description: ให้ Sol แบ่งงาน คุมคุณภาพ และส่งมอบโปรเจกต์
+  display_name: GPT-6 Sol Project Leader
+  short_description: ให้ GPT-6 Sol แบ่งงาน คุมคุณภาพ และส่งมอบโปรเจกต์
   default_prompt: Use $manage-programming-project to lead this programming project,
     delegate suitable tasks, and verify the final result.
   icon_small: assets/icon.svg

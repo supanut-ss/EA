@@ -4,9 +4,9 @@
 
 | Model | Assign when | Avoid when |
 | --- | --- | --- |
-| `gpt-5.6-sol` | Project leadership, architecture, ambiguous requirements, complex implementation, difficult debugging, security-sensitive changes, integration, code review, final verification | A cheaper model can complete a fully specified mechanical subtask without increasing integration risk |
-| `gpt-5.6-terra` | Routine feature implementation, isolated multi-file changes, tests, refactors, API wiring, documentation requiring technical judgment | The task owns architecture, has severe uncertainty, or crosses many subsystem boundaries |
-| `gpt-5.6-luna` | Fast repository searches, inventory, simple test additions, mechanical edits, formatting, small documentation updates, reproducible command checks | Ambiguous logic, architecture, security decisions, difficult debugging, or final approval |
+| `gpt-6-astra` | Exceptionally demanding architecture, severe ambiguity, cross-system failure analysis, and high-consequence design or security review | Routine implementation, mechanical work, or a second review that adds no meaningful confidence |
+| `gpt-6-sol` | Project leadership, architecture, ambiguous requirements, complex implementation, difficult debugging, security-sensitive changes, integration, code review, and final verification | A faster model can complete a fully specified, low-risk subtask without increasing integration risk |
+| `gpt-6-luna` | Fast repository searches, inventory, simple test additions, mechanical edits, formatting, small documentation updates, and reproducible command checks | Ambiguous logic, architecture, security decisions, difficult debugging, or final approval |
 
 Prefer the inherited model unless a different model materially improves cost, speed, or quality. Use only model identifiers actually exposed by the runtime.
 
@@ -22,6 +22,8 @@ Prefer the inherited model unless a different model materially improves cost, sp
 
 Choose the lowest effort that can reliably satisfy the acceptance criteria. Escalate when evidence contradicts assumptions, tests repeatedly fail, or the task expands across boundaries. Do not use `max` or `ultra` by default.
 
+Use only reasoning efforts exposed for the selected model. The current runtime offers `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` for Astra and Sol; Luna supports up to `max`.
+
 ## Delegation decision
 
 Delegate only when all are true:
@@ -30,20 +32,20 @@ Delegate only when all are true:
 2. Relevant context can be supplied without transferring project leadership.
 3. File ownership is non-overlapping, or the task is findings-only.
 4. Parallel work saves time or specialist attention improves quality.
-5. Sol can verify the result before integration.
+5. The Sol lead can verify the result before integration.
 
-Keep work with Sol when it determines architecture, changes a shared contract, is too small to justify coordination, depends on rapidly changing local state, or cannot be independently verified.
+Keep work with Sol when it determines architecture, changes a shared contract, is too small to justify coordination, depends on rapidly changing local state, or cannot be independently verified. Consult Astra for unusually high complexity or consequences while keeping integration ownership with Sol.
 
 ## Default routing examples
 
 | Task | Model | Effort |
 | --- | --- | --- |
-| Inspect repository structure and identify test commands | Luna | low |
-| Implement an isolated CRUD module with established patterns | Terra | medium |
-| Add regression tests for a known bug | Terra | medium |
-| Diagnose an intermittent race across services | Sol | high or xhigh |
-| Design a database migration with rollback and compatibility | Sol | xhigh |
-| Review integrated changes against acceptance criteria | Sol | high |
+| Inspect repository structure and identify test commands | gpt-6-luna | low |
+| Implement an isolated CRUD module with established patterns | gpt-6-sol | medium |
+| Add regression tests for a known bug | gpt-6-sol | medium |
+| Diagnose an intermittent race across services | gpt-6-astra | high or xhigh |
+| Design a database migration with rollback and compatibility | gpt-6-sol, with Astra consultation for unusual risk | xhigh |
+| Review integrated changes against acceptance criteria | gpt-6-sol | high |
 
 ## Quality gates
 

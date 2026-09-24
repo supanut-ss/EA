@@ -1,27 +1,27 @@
 ---
 name: manage-programming-project
-description: Lead and control programming projects as Claude Code, delegating bounded tasks to subagents via the Agent tool, selecting agent type and model (Opus 5 / Sonnet 5 / Haiku 4.5) by complexity and risk, coordinating shared files, reviewing every contribution, integrating changes, and verifying the final result. Use for software implementation, refactoring, debugging, migration, architecture, testing, repository-wide changes, or any coding request that benefits from multi-agent planning and controlled delegation.
+description: Lead and control programming projects with gpt-6-sol as the engineering lead, using gpt-6-astra for exceptionally demanding decisions and delegating bounded tasks to suitable available models. Use for software implementation, refactoring, debugging, migration, architecture, testing, repository-wide changes, or coding requests that benefit from multi-agent planning and controlled delegation.
 ---
 
 # Manage Programming Project
 
-Act as the single accountable engineering leader. Keep requirements, architecture, priorities, integration, verification, and final communication under the top-level Claude Code session's control.
+Act as the single accountable engineering leader. Keep requirements, architecture, priorities, integration, verification, and final communication under `gpt-6-sol` control. Consult `gpt-6-astra` for unusually demanding architectural decisions, difficult ambiguity, or high-consequence reviews when model selection is available; the Sol lead retains ownership of the plan and integration.
 
 Read [references/delegation-policy.md](references/delegation-policy.md) before assigning work.
 
 ## Establish leadership
 
-1. The top-level Claude Code session (this conversation) is the leader by default. It owns requirements, architecture, integration, and final review.
-2. Delegate bounded subtasks to subagents via the `Agent` tool, choosing `subagent_type` (e.g. `Explore`, `general-purpose`, `Plan`, `claude-code-guide`, or a project-specific agent) and, when it matters for cost/speed/quality, a `model` override (`opus`, `sonnet`, `haiku`, `fable`). Omit `model` to inherit the session's default.
-3. Do not delegate merely to increase agent count. Keep tightly coupled, ambiguous, high-risk, or architectural work in the leader's own hands rather than spawning an agent for it.
-4. Never claim a model or agent ran when it did not. If an agent type or model is unavailable in this environment, say so and proceed with the strongest available option.
+1. Confirm that the active leader is `gpt-6-sol` when model identity is available.
+2. If the active model is not `gpt-6-sol` and model-selectable agents are available, create a `gpt-6-sol` planning/review agent first. Give it the requirements and repository evidence needed to produce the work breakdown, architectural constraints, integration order, and acceptance gates. Keep the top-level agent responsible for executing that plan and obtaining Sol review before delivery.
+3. If model selection is unavailable, state the limitation briefly and follow this workflow with the strongest available model. Never pretend a requested model was used.
+4. Do not delegate merely to increase agent count. Keep tightly coupled, ambiguous, high-risk, or architectural work with Sol; consult Astra only when the task's complexity or consequences justify it.
 
 ## Inspect before planning
 
-1. Read repository instructions such as `CLAUDE.md`/`AGENTS.md`, project manifests, relevant source, tests, and current version-control status (`git status`, `git log`).
+1. Read repository instructions such as `AGENTS.md`, project manifests, relevant source, tests, and current version-control status.
 2. Preserve unrelated user changes. Never reset, overwrite, or reformat unrelated work.
 3. Translate the request into explicit deliverables, constraints, risks, dependencies, and acceptance criteria.
-4. Identify unknowns. Ask the user (via `AskUserQuestion`) only when an unknown materially changes the result; otherwise record a reasonable assumption and proceed.
+4. Identify unknowns. Ask the user only when an unknown materially changes the result; otherwise record a reasonable assumption.
 
 ## Create the master plan
 
@@ -29,46 +29,42 @@ Maintain one leader-owned plan with:
 
 - requirement and acceptance-criterion mapping;
 - architecture and interface decisions;
-- task owner (leader or a named subagent), model, file scope, dependencies, and expected output;
+- task owner, model, effort, file scope, dependencies, and expected output;
 - integration order and verification commands;
 - unresolved risks and decisions.
 
-For non-trivial implementation work, use `EnterPlanMode`/`ExitPlanMode` to align with the user on this plan before executing it.
-
-Keep at most one integration-critical step in progress. Parallelize only independent subagent tasks whose files or outputs do not conflict — batch independent `Agent` calls in a single response per the tool's parallel-call guidance.
+Keep at most one integration-critical step in progress. Parallelize only independent tasks whose files or outputs do not conflict.
 
 ## Delegate bounded work
 
-For every `Agent` call, provide in the prompt:
+For every assignment, provide:
 
 - one concrete objective and why it matters;
 - allowed and forbidden file scope;
-- relevant requirements, interfaces, and repository instructions the agent would not otherwise see (agents start with no memory of this conversation);
-- expected artifact or findings, and how terse or thorough the report should be;
+- relevant requirements, interfaces, and repository instructions;
+- expected artifact or findings;
 - validation commands and completion criteria;
 - instruction to report changed files, tests, assumptions, and blockers;
 - instruction not to expand scope, rewrite unrelated code, or make product decisions.
 
-Use the agent-type and model guidance in the delegation policy. The leader retains architecture, cross-cutting decisions, conflict resolution, integration, and final approval. Do not let a subagent spawn further agents unless the leader explicitly authorizes a separate bounded subtask.
-
-Prefer `run_in_background: false` only when the very next action depends on the result; otherwise let agents run in the background and continue other work, per the `Agent` tool's own guidance.
+Use the model and effort matrix in the delegation policy. Sol retains architecture, cross-cutting decisions, conflict resolution, integration, and final approval. Do not allow child agents to create more agents unless Sol explicitly needs and authorizes a separate bounded subtask.
 
 ## Coordinate shared work
 
 1. Assign non-overlapping file ownership whenever agents share a workspace.
 2. Tell agents that other work may appear concurrently and that they must not revert it.
-3. Use findings-only assignments (read-only agents, e.g. `Explore`) when concurrent edits would overlap.
+3. Use findings-only assignments when concurrent edits would overlap.
 4. Re-plan immediately when an interface, dependency, or assumption changes.
 5. Cancel or redirect obsolete tasks instead of integrating stale output.
 
 ## Review and integrate
 
-Treat every delegated result as untrusted until reviewed by the leader.
+Treat every delegated result as untrusted until reviewed by Sol.
 
-1. Inspect the actual diff and changed files, not only the agent's summary.
+1. Inspect the actual diff and changed files, not only the agent summary.
 2. Check correctness, interfaces, error paths, security, compatibility, maintainability, and scope discipline.
 3. Run focused tests after each integration boundary.
-4. Return defective work to the same agent with exact evidence when a bounded correction is efficient; otherwise fix it directly as the leader.
+4. Return defective work to the same agent with exact evidence when a bounded correction is efficient; otherwise fix it under Sol.
 5. Integrate in dependency order and resolve conflicts according to the master architecture.
 
 ## Verify the project
@@ -78,10 +74,10 @@ Run the strongest relevant checks available:
 - formatting, linting, type checking, build, and unit/integration tests;
 - targeted regression tests for changed behavior;
 - security or migration checks when risk warrants them;
-- final status and diff inspection (`git status`, `git diff`) for unintended files.
+- final status and diff inspection for unintended files.
 
 Map verification evidence back to every acceptance criterion. Clearly distinguish passed checks, unavailable checks, and remaining risks. Never claim success from an agent report alone.
 
 ## Deliver
 
-Lead with the completed outcome. Summarize important changes, verification evidence, assumptions, and any remaining limitations. Mention delegated agent/model details only when useful or requested. Do not expose internal orchestration noise.
+Lead with the completed outcome. Summarize important changes, verification evidence, assumptions, and any remaining limitations. Mention delegated model details only when useful or requested. Do not expose internal orchestration noise.

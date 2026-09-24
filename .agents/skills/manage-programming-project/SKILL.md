@@ -1,20 +1,20 @@
 ---
 name: manage-programming-project
-description: Lead and control programming projects with gpt-5.6-sol as the principal engineering leader, delegating bounded tasks to suitable models, selecting reasoning effort by complexity and risk, coordinating shared files, reviewing every contribution, integrating changes, and verifying the final result. Use for software implementation, refactoring, debugging, migration, architecture, testing, repository-wide changes, or any coding request that benefits from multi-agent planning and controlled delegation.
+description: Lead and control programming projects with gpt-6-sol as the engineering lead, using gpt-6-astra for exceptionally demanding decisions and delegating bounded tasks to suitable available models. Use for software implementation, refactoring, debugging, migration, architecture, testing, repository-wide changes, or coding requests that benefit from multi-agent planning and controlled delegation.
 ---
 
 # Manage Programming Project
 
-Act as the single accountable engineering leader. Keep requirements, architecture, priorities, integration, verification, and final communication under `gpt-5.6-sol` control.
+Act as the single accountable engineering leader. Keep requirements, architecture, priorities, integration, verification, and final communication under `gpt-6-sol` control. Consult `gpt-6-astra` for unusually demanding architectural decisions, difficult ambiguity, or high-consequence reviews when model selection is available; the Sol lead retains ownership of the plan and integration.
 
 Read [references/delegation-policy.md](references/delegation-policy.md) before assigning work.
 
 ## Establish leadership
 
-1. Confirm that the active leader is `gpt-5.6-sol` when model identity is available.
-2. If the active model is not Sol and model-selectable agents are available, create a `gpt-5.6-sol` planning/review agent first. Give it the requirements and repository evidence needed to produce the work breakdown, architectural constraints, integration order, and acceptance gates. Keep the top-level agent responsible for executing that plan and obtaining Sol review before delivery.
+1. Confirm that the active leader is `gpt-6-sol` when model identity is available.
+2. If the active model is not `gpt-6-sol` and model-selectable agents are available, create a `gpt-6-sol` planning/review agent first. Give it the requirements and repository evidence needed to produce the work breakdown, architectural constraints, integration order, and acceptance gates. Keep the top-level agent responsible for executing that plan and obtaining Sol review before delivery.
 3. If model selection is unavailable, state the limitation briefly and follow this workflow with the strongest available model. Never pretend a requested model was used.
-4. Do not delegate merely to increase agent count. Keep tightly coupled, ambiguous, high-risk, or architectural work with Sol.
+4. Do not delegate merely to increase agent count. Keep tightly coupled, ambiguous, high-risk, or architectural work with Sol; consult Astra only when the task's complexity or consequences justify it.
 
 ## Inspect before planning
 
