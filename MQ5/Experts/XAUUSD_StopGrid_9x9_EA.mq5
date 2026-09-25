@@ -3,7 +3,7 @@
 //| Symmetric nine-level Buy Stop / Sell Stop grid for MetaTrader 5. |
 //+------------------------------------------------------------------+
 #property copyright "Custom EA - XAUUSD 9x9 Stop Grid"
-#property version   "1.20"
+#property version   "1.21"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -11,6 +11,8 @@
 CTrade trade;
 
 #define MAX_GRID_LEVELS 32
+#define MAX_TRADE_SESSIONS_PER_DAY 64
+#define MAX_TRADE_SESSIONS_PER_WEEK (7 * MAX_TRADE_SESSIONS_PER_DAY)
 #define TRAIL_ACTIVATION_LEVEL 3
 #define TRAIL_STEP_PRICE 1.0
 
@@ -27,11 +29,20 @@ enum ENUM_OPPOSITE_MODE
    OPPOSITE_DELETE           // Delete the other side's pending orders after the first fill.
   };
 
+input group "=== Entry Signal Filters ==="
+input int                 InpRSIPeriod           = 7;
+input double              InpRSIBuyBelow         = 15.0;
+input double              InpRSISellAbove        = 85.0;
+input int                 InpADXPeriod           = 14;
+input double              InpADXStrongTrendThreshold = 40.0;
+input bool                InpUseM5EMAFilter      = true;
+input int                 InpTrendEMAPeriod      = 200;
+
 input group "=== Grid Setup ==="
 input int                 InpLevelsPerSide       = 9;          // Buy Stop and Sell Stop levels on each side.
 input double              InpGridStepPrice       = 2.0;        // Price distance per level; 2.0 means $2.00, independent of _Point.
 input double              InpFirstLevelLot       = 0.01;       // Level 1 lot; the opposite side's level 1 always matches it.
-input ENUM_GRID_LOT_MODE  InpLotMode             = GRID_LOT_EQUAL;
+input ENUM_GRID_LOT_MODE  InpLotMode             = GRID_LOT_ODD_MULTIPLIER;
 input string              InpCustomLotSequence  = "0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01"; // One lot per level; level 1 must match InpFirstLevelLot.
 input ENUM_OPPOSITE_MODE  InpOppositeMode        = OPPOSITE_KEEP;
 input bool                InpAutoRearmAfterCycle = true;
@@ -43,19 +54,31 @@ input double              InpTakeProfitBeyondLast = 2.0;        // Extra distanc
 input double              InpMaxSpreadPrice      = 0.20;       // 0 disables the spread filter.
 input int                 InpSlippagePoints      = 100;
 input int                 InpExpirationHours     = 0;          // 0 means GTC.
+input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
-input double              InpMaxRiskPercent      = 2.0;        // Reject the grid when modeled conservative anchor-stop risk exceeds this % of equity; 0 disables.
+input double              InpMaxRiskPercent      = 0.0;        // Reject the grid when modeled conservative anchor-stop risk exceeds this % of equity; 0 disables.
 input double              InpRiskSlipBufferPrice = 0.05;       // Extra adverse close-price buffer used only by the risk estimate.
 input double              InpMinMarginLevelPct   = 300.0;      // Projected margin level after all pending orders fill; 0 disables.
 input int                 InpRetrySeconds        = 30;
+
+struct STradeSession
+  {
+   int dayOfWeek;
+   int startSeconds;
+   int endSeconds;
+  };
 
 double   g_tickSize = 0.0;
 double   g_volumeMin = 0.0;
 double   g_volumeMax = 0.0;
 double   g_volumeStep = 0.0;
 double   g_customLots[];
+int      g_rsiHandle = INVALID_HANDLE;
+int      g_adxHandle = INVALID_HANDLE;
+int      g_m5EmaHandle = INVALID_HANDLE;
+datetime g_lastM1SignalBarTime = 0;
 double   g_anchorPrice = 0.0;
 datetime g_retryAfter = 0;
 bool     g_cycleHadActivity = false;
@@ -67,14 +90,487 @@ int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
 string   g_stateKey = "";
 
+STradeSession g_tradeSessions[MAX_TRADE_SESSIONS_PER_WEEK];
+int      g_tradeSessionDayStart[7];
+int      g_tradeSessionDayCount[7];
+int      g_tradeSessionCount = 0;
+datetime g_tradeSessionCacheDay = 0;
+datetime g_tradeSessionRetryAfter = 0;
+bool     g_tradeSessionScheduleLoaded = false;
+bool     g_tradeSessionWarningLogged = false;
+bool     g_sessionClosePending = false;
+
+//+------------------------------------------------------------------+
+bool ShouldLiquidateForSession(const bool isOpen,
+                               const int secondsUntilClose,
+                               const int minutesBeforeClose)
+  {
+   return(!isOpen || secondsUntilClose <= minutesBeforeClose * 60);
+  }
+
+//+------------------------------------------------------------------+
+datetime ServerDayStart(const datetime serverTime)
+  {
+   MqlDateTime parts;
+   if(!TimeToStruct(serverTime, parts))
+      return(0);
+   parts.hour = 0;
+   parts.min = 0;
+   parts.sec = 0;
+   return(StructToTime(parts));
+  }
+
+//+------------------------------------------------------------------+
+int SessionTimeSeconds(const datetime sessionTime)
+  {
+   MqlDateTime parts;
+   if(!TimeToStruct(sessionTime, parts))
+      return(0);
+   return(parts.hour * 3600 + parts.min * 60 + parts.sec);
+  }
+
+//+------------------------------------------------------------------+
+bool RefreshSymbolTradeSessions(const datetime serverTime)
+  {
+   datetime dayStart = ServerDayStart(serverTime);
+   if(dayStart <= 0)
+      return(false);
+   if(g_tradeSessionScheduleLoaded && g_tradeSessionCacheDay == dayStart)
+      return(true);
+   if(!g_tradeSessionScheduleLoaded && g_tradeSessionCacheDay == dayStart &&
+      serverTime < g_tradeSessionRetryAfter)
+      return(false);
+
+   g_tradeSessionCount = 0;
+   ArrayInitialize(g_tradeSessionDayStart, 0);
+   ArrayInitialize(g_tradeSessionDayCount, 0);
+   for(int day = 0; day < 7; day++)
+     {
+      g_tradeSessionDayStart[day] = g_tradeSessionCount;
+      for(uint sessionIndex = 0; sessionIndex < MAX_TRADE_SESSIONS_PER_DAY; sessionIndex++)
+        {
+         datetime sessionFrom = 0;
+         datetime sessionTo = 0;
+         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)day, sessionIndex,
+                                    sessionFrom, sessionTo))
+            break;
+         if(g_tradeSessionCount >= MAX_TRADE_SESSIONS_PER_WEEK)
+            break;
+         g_tradeSessions[g_tradeSessionCount].dayOfWeek = day;
+         g_tradeSessions[g_tradeSessionCount].startSeconds = SessionTimeSeconds(sessionFrom);
+         g_tradeSessions[g_tradeSessionCount].endSeconds = SessionTimeSeconds(sessionTo);
+         g_tradeSessionCount++;
+         g_tradeSessionDayCount[day]++;
+        }
+     }
+
+   g_tradeSessionCacheDay = dayStart;
+   g_tradeSessionScheduleLoaded = (g_tradeSessionCount > 0);
+   g_tradeSessionRetryAfter = serverTime + 60;
+   return(g_tradeSessionScheduleLoaded);
+  }
+
+//+------------------------------------------------------------------+
+bool GetSymbolTradeSessionState(const datetime serverTime,
+                                bool &isOpen,
+                                int &secondsUntilClose)
+  {
+   isOpen = false;
+   secondsUntilClose = 0;
+   if(!RefreshSymbolTradeSessions(serverTime))
+      return(false);
+
+   datetime todayStart = ServerDayStart(serverTime);
+   datetime sessionClose = 0;
+   for(int dayOffset = -1; dayOffset <= 0; dayOffset++)
+     {
+      datetime sessionDay = todayStart + (datetime)(dayOffset * 86400);
+      MqlDateTime dayParts;
+      if(!TimeToStruct(sessionDay, dayParts))
+         continue;
+      int day = dayParts.day_of_week;
+      for(int i = 0; i < g_tradeSessionDayCount[day]; i++)
+        {
+         int index = g_tradeSessionDayStart[day] + i;
+         datetime sessionFrom = sessionDay + (datetime)g_tradeSessions[index].startSeconds;
+         datetime sessionTo = sessionDay + (datetime)g_tradeSessions[index].endSeconds;
+         if(sessionTo <= sessionFrom)
+            sessionTo += 86400;
+         if(serverTime >= sessionFrom && serverTime < sessionTo)
+           {
+            isOpen = true;
+            if(sessionTo > sessionClose)
+               sessionClose = sessionTo;
+           }
+        }
+     }
+
+   if(!isOpen)
+      return(true);
+
+   // Merge sessions that touch or overlap so an internal schedule boundary is not treated as a break.
+   for(int pass = 0; pass < MAX_GRID_LEVELS; pass++)
+     {
+      bool extended = false;
+      for(int dayOffset = -1; dayOffset <= 8; dayOffset++)
+        {
+         datetime sessionDay = todayStart + (datetime)(dayOffset * 86400);
+         MqlDateTime dayParts;
+         if(!TimeToStruct(sessionDay, dayParts))
+            continue;
+         int day = dayParts.day_of_week;
+         for(int i = 0; i < g_tradeSessionDayCount[day]; i++)
+           {
+            int index = g_tradeSessionDayStart[day] + i;
+            datetime sessionFrom = sessionDay + (datetime)g_tradeSessions[index].startSeconds;
+            datetime sessionTo = sessionDay + (datetime)g_tradeSessions[index].endSeconds;
+            if(sessionTo <= sessionFrom)
+               sessionTo += 86400;
+            if(sessionFrom <= sessionClose + 1 && sessionTo > sessionClose)
+              {
+               sessionClose = sessionTo;
+               extended = true;
+              }
+           }
+        }
+      if(!extended)
+         break;
+     }
+
+   secondsUntilClose = (int)MathMax(0, (long)(sessionClose - serverTime));
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void SetSessionClosePending(const bool pending)
+  {
+   if(g_sessionClosePending == pending)
+      return;
+   g_sessionClosePending = pending;
+   if(pending)
+     {
+      GlobalVariableSet(SessionClosePendingKey(), 1.0);
+      Print("StopGrid9: session close guard activated; EA positions and pending orders will be retired.");
+     }
+   else
+     {
+      if(GlobalVariableCheck(SessionClosePendingKey()))
+         GlobalVariableDel(SessionClosePendingKey());
+      Print("StopGrid9: session reopened and EA activity is clear; waiting for a fresh M1 signal.");
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool ManageSessionCloseState(const bool closeWindowActive,
+                             const bool tradeAllowed)
+  {
+   if(closeWindowActive)
+     {
+      SkipClosedM1EntryBars();
+      SetSessionClosePending(true);
+      if(tradeAllowed && HasOwnActivity())
+        {
+         DeleteAllOwnPending();
+         CloseAllOwnPositions();
+        }
+      return(true);
+     }
+
+   if(!g_sessionClosePending)
+      return(false);
+
+   SkipClosedM1EntryBars();
+   if(HasOwnActivity())
+     {
+      if(tradeAllowed)
+        {
+         DeleteAllOwnPending();
+         CloseAllOwnPositions();
+        }
+      return(true);
+     }
+
+   SetSessionClosePending(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+int AdxTrendDirectionFromValues(const double adxValue,
+                                const double plusDiValue,
+                                const double minusDiValue,
+                                const double strongTrendThreshold)
+  {
+   if(adxValue <= strongTrendThreshold)
+      return(0);
+   if(plusDiValue > minusDiValue)
+      return(1);
+   if(minusDiValue > plusDiValue)
+      return(-1);
+   return(2);
+  }
+
+//+------------------------------------------------------------------+
+int GridDirectionForEntrySignal(const int signal,
+                                const double adxValue,
+                                const double plusDiValue,
+                                const double minusDiValue,
+                                const double strongTrendThreshold)
+  {
+   if(signal != 1 && signal != -1)
+      return(2);
+   int trendDirection = AdxTrendDirectionFromValues(adxValue, plusDiValue,
+                                                    minusDiValue, strongTrendThreshold);
+   if(trendDirection == 2 || (trendDirection != 0 && trendDirection != signal))
+      return(2);
+   return(trendDirection);
+  }
+
+//+------------------------------------------------------------------+
+int M5EMATrendDirectionFromValues(const double closedM5Price,
+                                  const double closedM5EMA)
+  {
+   if(closedM5Price > closedM5EMA)
+      return(1);
+   if(closedM5Price < closedM5EMA)
+      return(-1);
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+int ApplyM5EMAEntryFilter(const int signal,
+                          const int emaTrendDirection,
+                          const bool filterEnabled)
+  {
+   if(signal != 1 && signal != -1)
+      return(0);
+   if(!filterEnabled || signal == emaTrendDirection)
+      return(signal);
+   return(0);
+  }
+
+int EntrySignalFromValues(const double rsiValue,
+                          const double adxValue,
+                          const double plusDiValue,
+                          const double minusDiValue,
+                          const double buyBelow,
+                          const double sellAbove,
+                          const double strongTrendThreshold,
+                          int &gridDirection)
+  {
+   gridDirection = 0;
+   int signal = 0;
+   if(rsiValue < buyBelow)
+      signal = 1;
+   else if(rsiValue > sellAbove)
+      signal = -1;
+   if(signal == 0)
+      return(0);
+
+   gridDirection = GridDirectionForEntrySignal(signal, adxValue, plusDiValue,
+                                               minusDiValue, strongTrendThreshold);
+   if(gridDirection == 2)
+     {
+      gridDirection = 0;
+      return(0);
+     }
+   return(signal);
+  }
+
+//+------------------------------------------------------------------+
+bool ReadM1ADXValues(const int shift,
+                     double &adxValue,
+                     double &plusDiValue,
+                     double &minusDiValue)
+  {
+   adxValue = 0.0;
+   plusDiValue = 0.0;
+   minusDiValue = 0.0;
+   if(g_adxHandle == INVALID_HANDLE)
+      return(false);
+
+   double adxCurrent[1];
+   double plusDiCurrent[1];
+   double minusDiCurrent[1];
+   if(CopyBuffer(g_adxHandle, 0, shift, 1, adxCurrent) != 1 ||
+      CopyBuffer(g_adxHandle, 1, shift, 1, plusDiCurrent) != 1 ||
+      CopyBuffer(g_adxHandle, 2, shift, 1, minusDiCurrent) != 1)
+      return(false);
+
+   adxValue = adxCurrent[0];
+   plusDiValue = plusDiCurrent[0];
+   minusDiValue = minusDiCurrent[0];
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool ReadLatestClosedM5EMATrend(int &trendDirection,
+                                double &closedM5Price,
+                                double &closedM5EMA)
+  {
+   trendDirection = 0;
+   closedM5Price = 0.0;
+   closedM5EMA = 0.0;
+   if(g_m5EmaHandle == INVALID_HANDLE ||
+      BarsCalculated(g_m5EmaHandle) < InpTrendEMAPeriod + 1 ||
+      iTime(_Symbol, PERIOD_M5, 1) <= 0)
+      return(false);
+
+   double emaCurrent[1];
+   if(CopyBuffer(g_m5EmaHandle, 0, 1, 1, emaCurrent) != 1)
+      return(false);
+
+   closedM5Price = iClose(_Symbol, PERIOD_M5, 1);
+   closedM5EMA = emaCurrent[0];
+   if(!MathIsValidNumber(closedM5Price) || !MathIsValidNumber(closedM5EMA) ||
+      closedM5Price <= 0.0 || closedM5EMA <= 0.0 || closedM5EMA == EMPTY_VALUE)
+      return(false);
+
+   trendDirection = M5EMATrendDirectionFromValues(closedM5Price, closedM5EMA);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void CancelCounterTrendPendingOrders(const int trendDirection)
+  {
+   if(trendDirection == 0)
+      return;
+
+   if(trendDirection != 1 && trendDirection != -1)
+     {
+      int pendingBefore = CountOwnPendingOrders();
+      if(pendingBefore > 0)
+        {
+         DeleteAllOwnPending();
+         Print("StopGrid9: ADX is strong but DI direction is unclear; deleting all ",
+               pendingBefore, " EA pending orders.");
+        }
+      return;
+     }
+
+   string counterTrendMarker = (trendDirection > 0 ? "SG9|S|" : "SG9|B|");
+   int canceled = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
+         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
+         StringFind(OrderGetString(ORDER_COMMENT), counterTrendMarker) < 0)
+         continue;
+      bool requestSent = trade.OrderDelete(ticket);
+      if(TradeResultAccepted(requestSent, true))
+         canceled++;
+      else
+         Print("StopGrid9: failed to delete counter-trend pending order #", ticket,
+               " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+     }
+   if(canceled > 0)
+      Print("StopGrid9: ADX > ", DoubleToString(InpADXStrongTrendThreshold, 1),
+            "; deleted ", canceled, " counter-trend pending orders.");
+  }
+
+//+------------------------------------------------------------------+
+void ManageStrongAdxPendingOrders()
+  {
+   if(CountOwnPendingOrders() <= 0)
+      return;
+
+   double adxValue = 0.0;
+   double plusDiValue = 0.0;
+   double minusDiValue = 0.0;
+   if(!ReadM1ADXValues(0, adxValue, plusDiValue, minusDiValue))
+     {
+      int pendingBefore = CountOwnPendingOrders();
+      DeleteAllOwnPending();
+      Print("StopGrid9: unable to read closed M1 ADX/DI while grid is active; fail-safe deleted ",
+            pendingBefore, " EA pending orders.");
+      return;
+     }
+
+   int trendDirection = AdxTrendDirectionFromValues(adxValue, plusDiValue,
+                                                    minusDiValue, InpADXStrongTrendThreshold);
+   if(trendDirection != 0)
+      CancelCounterTrendPendingOrders(trendDirection);
+  }
+
+//+------------------------------------------------------------------+
+void SkipClosedM1EntryBars()
+  {
+   datetime closedBarTime = iTime(_Symbol, PERIOD_M1, 1);
+   if(closedBarTime > 0 && closedBarTime > g_lastM1SignalBarTime)
+      g_lastM1SignalBarTime = closedBarTime;
+  }
+
+//+------------------------------------------------------------------+
+bool ReadNewClosedM1EntrySignal(int &signal,
+                                double &rsiValue,
+                                double &adxValue,
+                                double &plusDiValue,
+                                double &minusDiValue,
+                                int &emaTrendDirection,
+                                double &closedM5Price,
+                                double &closedM5EMA,
+                                int &gridDirection,
+                                datetime &signalBarTime)
+  {
+   signal = 0;
+   rsiValue = 0.0;
+   adxValue = 0.0;
+   plusDiValue = 0.0;
+   minusDiValue = 0.0;
+   emaTrendDirection = 0;
+   closedM5Price = 0.0;
+   closedM5EMA = 0.0;
+   gridDirection = 0;
+   signalBarTime = 0;
+
+   datetime closedBarTime = iTime(_Symbol, PERIOD_M1, 1);
+   if(closedBarTime <= 0)
+      return(false);
+   if(g_lastM1SignalBarTime <= 0)
+     {
+      g_lastM1SignalBarTime = closedBarTime;
+      return(false);
+     }
+   if(closedBarTime <= g_lastM1SignalBarTime)
+      return(false);
+   if(g_rsiHandle == INVALID_HANDLE || g_adxHandle == INVALID_HANDLE ||
+      (InpUseM5EMAFilter && g_m5EmaHandle == INVALID_HANDLE))
+      return(false);
+
+   double rsiCurrent[1];
+   if(CopyBuffer(g_rsiHandle, 0, 1, 1, rsiCurrent) != 1 ||
+       !ReadM1ADXValues(1, adxValue, plusDiValue, minusDiValue))
+      return(false);
+   if(InpUseM5EMAFilter &&
+      !ReadLatestClosedM5EMATrend(emaTrendDirection, closedM5Price, closedM5EMA))
+      return(false);
+
+   g_lastM1SignalBarTime = closedBarTime;
+   signalBarTime = closedBarTime;
+   rsiValue = rsiCurrent[0];
+   signal = EntrySignalFromValues(rsiValue,
+                                   adxValue, plusDiValue, minusDiValue,
+                                  InpRSIBuyBelow, InpRSISellAbove,
+                                  InpADXStrongTrendThreshold, gridDirection);
+   signal = ApplyM5EMAEntryFilter(signal, emaTrendDirection, InpUseM5EMAFilter);
+   if(signal == 0)
+      gridDirection = 0;
+   return(true);
+  }
+
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   if(InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
-      InpGridStepPrice <= 0.0 || InpFirstLevelLot <= 0.0 ||
-      InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
-      InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
-      InpSlippagePoints < 0 ||
+   if(InpRSIPeriod < 1 || InpADXPeriod < 1 ||
+       (InpUseM5EMAFilter && InpTrendEMAPeriod < 1) ||
+       InpADXStrongTrendThreshold <= 0.0 || InpADXStrongTrendThreshold >= 100.0 ||
+       InpRSIBuyBelow <= 0.0 || InpRSISellAbove >= 100.0 ||
+       InpRSIBuyBelow >= InpRSISellAbove ||
+       InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
+       InpGridStepPrice <= 0.0 || InpFirstLevelLot <= 0.0 ||
+       InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
+       InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
+       InpSlippagePoints < 0 || InpMinutesBeforeSessionClose < 1 ||
       InpMaxRiskPercent < 0.0 || InpRiskSlipBufferPrice < 0.0 ||
       InpMinMarginLevelPct < 0.0 || InpRetrySeconds < 1 ||
       InpRearmDelaySeconds < 0 ||
@@ -113,6 +609,8 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
 
    g_stateKey = StateKey();
+   if(GlobalVariableCheck(SessionClosePendingKey()))
+      g_sessionClosePending = (GlobalVariableGet(SessionClosePendingKey()) > 0.5);
    if(GlobalVariableCheck(TrailingDirectionKey()))
      {
       double savedDirection = GlobalVariableGet(TrailingDirectionKey());
@@ -139,6 +637,29 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetAsyncMode(false);
 
+   g_rsiHandle = iRSI(_Symbol, PERIOD_M1, InpRSIPeriod, PRICE_CLOSE);
+   g_adxHandle = iADX(_Symbol, PERIOD_M1, InpADXPeriod);
+   if(InpUseM5EMAFilter)
+      g_m5EmaHandle = iMA(_Symbol, PERIOD_M5, InpTrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_rsiHandle == INVALID_HANDLE || g_adxHandle == INVALID_HANDLE ||
+      (InpUseM5EMAFilter && g_m5EmaHandle == INVALID_HANDLE))
+     {
+      Print("StopGrid9: unable to create M1 RSI/ADX or M5 EMA trend-filter handles. Error=", GetLastError());
+      return(INIT_FAILED);
+     }
+   g_lastM1SignalBarTime = iTime(_Symbol, PERIOD_M1, 1);
+
+   bool sessionOpen = false;
+   int secondsUntilSessionClose = 0;
+   if(!GetSymbolTradeSessionState(TimeCurrent(), sessionOpen, secondsUntilSessionClose))
+     {
+      g_tradeSessionWarningLogged = true;
+      Print("StopGrid9: symbol trade sessions are unavailable; new grids are blocked until the schedule can be read.");
+     }
+   else if(ShouldLiquidateForSession(sessionOpen, secondsUntilSessionClose,
+                                     InpMinutesBeforeSessionClose))
+      SetSessionClosePending(true);
+
    if(HasOwnActivity())
      {
       g_anchorPrice = RecoverAnchorPrice();
@@ -148,17 +669,24 @@ int OnInit()
          return(INIT_FAILED);
         }
       g_cycleHadActivity = true;
-      g_startedOnce = true;
-      Print("StopGrid9: resumed existing grid at anchor ", DoubleToString(g_anchorPrice, _Digits));
-      ManageGridExitRules();
+       g_startedOnce = true;
+       Print("StopGrid9: resumed existing grid at anchor ", DoubleToString(g_anchorPrice, _Digits));
+       if(g_sessionClosePending)
+          SkipClosedM1EntryBars();
+       else
+         {
+          ManageStrongAdxPendingOrders();
+          ManageGridExitRules();
+         }
       return(INIT_SUCCEEDED);
      }
 
    ClearSavedAnchor();
-   if(StartGrid())
-      g_startedOnce = true;
-   else
-      g_retryAfter = TimeCurrent() + InpRetrySeconds;
+     Print("StopGrid9: waiting for a fresh closed M1 signal: RSI < ", DoubleToString(InpRSIBuyBelow, 1),
+           " or RSI > ", DoubleToString(InpRSISellAbove, 1), " | ADX(", InpADXPeriod,
+         ") > ", DoubleToString(InpADXStrongTrendThreshold, 1),
+         " allows entries and pending orders only with the +DI/-DI trend | M5 EMA filter=",
+         (InpUseM5EMAFilter ? IntegerToString(InpTrendEMAPeriod) : "OFF"));
 
    return(INIT_SUCCEEDED);
   }
@@ -166,6 +694,12 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   if(g_rsiHandle != INVALID_HANDLE)
+      IndicatorRelease(g_rsiHandle);
+   if(g_adxHandle != INVALID_HANDLE)
+      IndicatorRelease(g_adxHandle);
+   if(g_m5EmaHandle != INVALID_HANDLE)
+      IndicatorRelease(g_m5EmaHandle);
    Comment("");
    // Open positions and pending orders retain their server-side SL/TP on EA removal.
   }
@@ -173,16 +707,51 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+   bool tradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
+                        MQLInfoInteger(MQL_TRADE_ALLOWED));
+   bool sessionOpen = false;
+   int secondsUntilSessionClose = 0;
+   if(!GetSymbolTradeSessionState(TimeCurrent(), sessionOpen, secondsUntilSessionClose))
+     {
+      SkipClosedM1EntryBars();
+      if(!g_tradeSessionWarningLogged)
+        {
+         Print("StopGrid9: symbol trade sessions are unavailable; new grids are blocked until the schedule can be read.");
+         g_tradeSessionWarningLogged = true;
+        }
+      if(tradeAllowed && HasOwnActivity())
+        {
+         g_cycleHadActivity = true;
+         g_startedOnce = true;
+         if(g_anchorPrice <= 0.0)
+            g_anchorPrice = RecoverAnchorPrice();
+         DeleteAllOwnPending();
+         ManageGridExitRules();
+        }
       return;
+     }
+   g_tradeSessionWarningLogged = false;
+
+   if(ManageSessionCloseState(ShouldLiquidateForSession(sessionOpen, secondsUntilSessionClose,
+                                                        InpMinutesBeforeSessionClose),
+                              tradeAllowed))
+      return;
+
+   if(!tradeAllowed)
+     {
+      SkipClosedM1EntryBars();
+      return;
+     }
 
    if(HasOwnActivity())
      {
-      g_cycleHadActivity = true;
-      g_startedOnce = true;
-      if(g_anchorPrice <= 0.0)
-         g_anchorPrice = RecoverAnchorPrice();
-      ManageGridExitRules();
+      SkipClosedM1EntryBars();
+       g_cycleHadActivity = true;
+       g_startedOnce = true;
+       if(g_anchorPrice <= 0.0)
+          g_anchorPrice = RecoverAnchorPrice();
+       ManageStrongAdxPendingOrders();
+       ManageGridExitRules();
       return;
      }
 
@@ -196,14 +765,53 @@ void OnTick()
      }
 
    if(g_startedOnce && !InpAutoRearmAfterCycle)
+     {
+      SkipClosedM1EntryBars();
       return;
+     }
    if(TimeCurrent() < g_retryAfter)
+     {
+      SkipClosedM1EntryBars();
+      return;
+     }
+
+   int entrySignal = 0;
+   double rsiValue = 0.0;
+   double adxValue = 0.0;
+   double plusDiValue = 0.0;
+   double minusDiValue = 0.0;
+   int emaTrendDirection = 0;
+   double closedM5Price = 0.0;
+   double closedM5EMA = 0.0;
+   int gridDirection = 0;
+   datetime signalBarTime = 0;
+   if(!ReadNewClosedM1EntrySignal(entrySignal, rsiValue, adxValue,
+                                  plusDiValue, minusDiValue, emaTrendDirection,
+                                  closedM5Price, closedM5EMA, gridDirection,
+                                  signalBarTime) || entrySignal == 0)
       return;
 
-   if(StartGrid())
+   string emaTrendLabel = "off";
+   if(InpUseM5EMAFilter)
+      emaTrendLabel = (emaTrendDirection > 0 ? "above" :
+                       (emaTrendDirection < 0 ? "below" : "equal"));
+
+    Print("StopGrid9: confirmed M1 ", (entrySignal > 0 ? "BUY" : "SELL"),
+           " entry signal at ", TimeToString(signalBarTime, TIME_DATE | TIME_MINUTES),
+           " | RSI(", InpRSIPeriod, ")=", DoubleToString(rsiValue, 2),
+         " | ADX(", InpADXPeriod, ")=", DoubleToString(adxValue, 2),
+         " | +DI=", DoubleToString(plusDiValue, 2),
+         " | -DI=", DoubleToString(minusDiValue, 2),
+         " | M5 EMA trend=", emaTrendLabel,
+         (InpUseM5EMAFilter ? StringFormat(" (close=%s, EMA=%s)",
+                                            DoubleToString(closedM5Price, _Digits),
+                                            DoubleToString(closedM5EMA, _Digits)) : ""),
+         " | grid=", (gridDirection > 0 ? "BUY-only" :
+                      (gridDirection < 0 ? "SELL-only" : "both sides")), ".");
+   if(StartGrid(gridDirection))
       g_startedOnce = true;
    else
-      g_retryAfter = TimeCurrent() + InpRetrySeconds;
+      Print("StopGrid9: this M1 signal could not arm the grid; waiting for the next fresh signal.");
   }
 
 //+------------------------------------------------------------------+
@@ -230,8 +838,10 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
   }
 
 //+------------------------------------------------------------------+
-bool StartGrid()
+bool StartGrid(const int gridDirection)
   {
+   if(gridDirection < -1 || gridDirection > 1)
+      return(false);
    if(HasOwnActivity())
       return(true);
 
@@ -254,10 +864,12 @@ bool StartGrid()
    double modeledRisk = 0.0;
    double projectedMargin = 0.0;
    double projectedMarginLevel = 0.0;
-   if(!PreflightGrid(anchor, modeledRisk, projectedMargin, projectedMarginLevel))
+   if(!PreflightGrid(anchor, gridDirection, modeledRisk, projectedMargin, projectedMarginLevel))
       return(false);
 
-   Print("StopGrid9: placing ", 2 * InpLevelsPerSide, " stop orders | anchor=", DoubleToString(anchor, _Digits),
+   int sideCount = (gridDirection == 0 ? 2 : 1);
+   Print("StopGrid9: placing ", sideCount * InpLevelsPerSide, " stop orders | anchor=", DoubleToString(anchor, _Digits),
+         " | grid=", (gridDirection > 0 ? "BUY-only" : (gridDirection < 0 ? "SELL-only" : "both sides")),
          " | step=", DoubleToString(InpGridStepPrice, 2), " | base lot=", DoubleToString(InpFirstLevelLot, VolumeDigits()),
          " | lot mode=", LotModeName(),
          " | modeled conservative anchor-stop risk=", DoubleToString(modeledRisk, 2), " ", AccountInfoString(ACCOUNT_CURRENCY),
@@ -281,12 +893,12 @@ bool StartGrid()
    GlobalVariableSet(g_stateKey, g_anchorPrice);
 
    ulong placedTickets[];
-   ArrayResize(placedTickets, 2 * InpLevelsPerSide);
+   ArrayResize(placedTickets, sideCount * InpLevelsPerSide);
    int placedCount = 0;
 
-   for(int sideIndex = 0; sideIndex < 2; sideIndex++)
+   for(int sideIndex = 0; sideIndex < sideCount; sideIndex++)
      {
-      int direction = (sideIndex == 0 ? 1 : -1);
+      int direction = (gridDirection == 0 ? (sideIndex == 0 ? 1 : -1) : gridDirection);
       for(int level = 1; level <= InpLevelsPerSide; level++)
         {
          double requestedLot = LotForLevel(level);
@@ -332,16 +944,23 @@ bool StartGrid()
 
    g_cycleHadActivity = true;
    g_startedOnce = true;
-   Print("StopGrid9: grid armed successfully. Buy Stop and Sell Stop ladders each contain ", InpLevelsPerSide, " levels.");
+   Print("StopGrid9: grid armed successfully with ", sideCount * InpLevelsPerSide,
+         " pending orders across ", sideCount, " side(s).");
    return(true);
   }
 
 //+------------------------------------------------------------------+
 bool PreflightGrid(const double anchor,
+                   const int gridDirection,
                    double &modeledRisk,
                    double &projectedMargin,
                    double &projectedMarginLevel)
   {
+   if(gridDirection < -1 || gridDirection > 1)
+      return(false);
+
+   bool includeBuy = (gridDirection >= 0);
+   bool includeSell = (gridDirection <= 0);
    modeledRisk = 0.0;
    projectedMargin = 0.0;
    projectedMarginLevel = 0.0;
@@ -373,7 +992,8 @@ bool PreflightGrid(const double anchor,
 
       double buyEntry = NormalizePrice(anchor + level * InpGridStepPrice);
       double sellEntry = NormalizePrice(anchor - level * InpGridStepPrice);
-      if(buyEntry <= tick.ask + minStopDistance || sellEntry >= tick.bid - minStopDistance)
+      if((includeBuy && buyEntry <= tick.ask + minStopDistance) ||
+         (includeSell && sellEntry >= tick.bid - minStopDistance))
         {
          Print("StopGrid9: a pending entry is inside the broker's minimum stop distance; grid placement will be retried.");
          return(false);
@@ -383,8 +1003,8 @@ bool PreflightGrid(const double anchor,
       double sellSl = NormalizePrice(anchor + InpStopLossBeyondAnchor);
       double buyTp = NormalizePrice(anchor + InpLevelsPerSide * InpGridStepPrice + InpTakeProfitBeyondLast);
       double sellTp = NormalizePrice(anchor - InpLevelsPerSide * InpGridStepPrice - InpTakeProfitBeyondLast);
-      if((buyEntry - buySl) < minStopDistance || (buyTp - buyEntry) < minStopDistance ||
-         (sellSl - sellEntry) < minStopDistance || (sellEntry - sellTp) < minStopDistance)
+      if((includeBuy && ((buyEntry - buySl) < minStopDistance || (buyTp - buyEntry) < minStopDistance)) ||
+         (includeSell && ((sellSl - sellEntry) < minStopDistance || (sellEntry - sellTp) < minStopDistance)))
         {
          Print("StopGrid9: one or more SL/TP levels violate the broker's minimum stop distance.");
          return(false);
@@ -397,15 +1017,15 @@ bool PreflightGrid(const double anchor,
       double buyRiskExit = buySl - InpRiskSlipBufferPrice;
       double sellRiskExit = sellSl + InpRiskSlipBufferPrice;
 
-      if(!OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lot, buyEntry, buyRiskExit, buyProfitAtStop) ||
-         !OrderCalcProfit(ORDER_TYPE_SELL, _Symbol, lot, sellEntry, sellRiskExit, sellProfitAtStop))
+      if((includeBuy && !OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lot, buyEntry, buyRiskExit, buyProfitAtStop)) ||
+         (includeSell && !OrderCalcProfit(ORDER_TYPE_SELL, _Symbol, lot, sellEntry, sellRiskExit, sellProfitAtStop)))
         {
          Print("StopGrid9: OrderCalcProfit failed; risk cannot be estimated, so no grid was placed. Error=", GetLastError());
          return(false);
         }
 
-      if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, buyEntry, buyRequiredMargin) ||
-         !OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, lot, sellEntry, sellRequiredMargin))
+      if((includeBuy && !OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, buyEntry, buyRequiredMargin)) ||
+         (includeSell && !OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, lot, sellEntry, sellRequiredMargin)))
         {
          Print("StopGrid9: OrderCalcMargin failed; grid affordability cannot be verified. Error=", GetLastError());
          return(false);
@@ -437,7 +1057,8 @@ bool PreflightGrid(const double anchor,
      }
 
    double hedgedMargin = SymbolInfoDouble(_Symbol, SYMBOL_MARGIN_HEDGED);
-   projectedMargin = (hedgedMargin <= 0.0 ? MathMax(buyMargin, sellMargin) : buyMargin + sellMargin);
+   projectedMargin = (gridDirection == 0 && hedgedMargin > 0.0 ?
+                      buyMargin + sellMargin : MathMax(buyMargin, sellMargin));
    double usedMargin = AccountInfoDouble(ACCOUNT_MARGIN);
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double totalMargin = usedMargin + projectedMargin;
@@ -1282,6 +1903,12 @@ string StateKey()
       symbolHash = symbolHash * 31 + (uint)StringGetCharacter(_Symbol, i);
    return(StringFormat("SG9.%I64d.%I64u.%u",
                        AccountInfoInteger(ACCOUNT_LOGIN), InpMagicNumber, symbolHash));
+  }
+
+//+------------------------------------------------------------------+
+string SessionClosePendingKey()
+  {
+   return(g_stateKey + ".SC");
   }
 
 //+------------------------------------------------------------------+

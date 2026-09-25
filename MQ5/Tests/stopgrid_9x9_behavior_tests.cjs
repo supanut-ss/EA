@@ -6,6 +6,17 @@ const path = require('node:path');
 const sourcePath = path.join(__dirname, '..', 'Experts', 'XAUUSD_StopGrid_9x9_EA.mq5');
 const source = fs.readFileSync(sourcePath, 'utf8');
 const functionNames = [
+  'ShouldLiquidateForSession',
+  'ManageSessionCloseState',
+  'SetSessionClosePending',
+  'AdxTrendDirectionFromValues',
+  'GridDirectionForEntrySignal',
+  'M5EMATrendDirectionFromValues',
+  'ApplyM5EMAEntryFilter',
+  'EntrySignalFromValues',
+  'LotForLevel',
+  'CancelCounterTrendPendingOrders',
+  'HasOwnActivity',
   'OnTradeTransaction',
   'CountOwnPositionsByDirection',
   'EvaluateThirdLevelCase',
@@ -26,6 +37,7 @@ const functionNames = [
   'ManageTrailingStops',
   'ClosePositionsByDirection',
   'DeleteAllOwnPending',
+  'CloseAllOwnPositions',
   'CountOwnPendingOrders',
   'TradeResultAccepted',
 ];
@@ -92,6 +104,9 @@ const POSITION_TYPE_BUY = 1;
 const POSITION_TYPE_SELL = 2;
 const TRAIL_ACTIVATION_LEVEL = 3;
 const TRAIL_STEP_PRICE = 1.0;
+const GRID_LOT_EQUAL = 0;
+const GRID_LOT_ODD_MULTIPLIER = 1;
+const GRID_LOT_CUSTOM = 2;
 const TRADE_RETCODE_DONE = 10009;
 const TRADE_RETCODE_DONE_PARTIAL = 10010;
 const TRADE_RETCODE_PLACED = 10008;
@@ -100,7 +115,11 @@ let _Symbol;
 let _Digits;
 let InpMagicNumber;
 let InpGridStepPrice;
+let InpFirstLevelLot;
+let InpLotMode;
 let InpRetrySeconds;
+let InpADXStrongTrendThreshold;
+let g_customLots;
 let g_anchorPrice;
 let g_tickSize;
 let g_stateKey;
@@ -120,6 +139,7 @@ let logs;
 let currentTime;
 let positionCloseAttempts;
 let allowPositionClose;
+let g_sessionClosePending;
 
 const trade = {
   retcode: TRADE_RETCODE_DONE,
@@ -155,7 +175,11 @@ function reset({ direction = 1, same = 3, opposite = 0 } = {}) {
   _Digits = 3;
   InpMagicNumber = 20260925;
   InpGridStepPrice = 2.0;
+  InpFirstLevelLot = 0.01;
+  InpLotMode = GRID_LOT_ODD_MULTIPLIER;
+  g_customLots = [];
   InpRetrySeconds = 30;
+  InpADXStrongTrendThreshold = 40.0;
   g_anchorPrice = 4000.0;
   g_tickSize = 0.001;
   g_stateKey = 'SG9.test';
@@ -164,6 +188,7 @@ function reset({ direction = 1, same = 3, opposite = 0 } = {}) {
   g_fixedCaseId = 0;
   g_fixedCaseDirection = 0;
   g_fixedCaseCloseRetryAfter = 0;
+  g_sessionClosePending = false;
   tick = direction > 0
     ? { bid: 4006.0, ask: 4006.2 }
     : { bid: 3994.0, ask: 3994.2 };
@@ -266,6 +291,10 @@ function HistoryOrderGetString(_ticket, property) {
 }
 function SymbolInfoTick() { return tick; }
 function GlobalVariableSet(key, value) { globals[key] = value; }
+function GlobalVariableCheck(key) { return Object.prototype.hasOwnProperty.call(globals, key); }
+function GlobalVariableDel(key) { delete globals[key]; }
+function SessionClosePendingKey() { return `${g_stateKey}.SC`; }
+function SkipClosedM1EntryBars() { logs.push('skip closed M1 bars'); }
 function TimeCurrent() { return currentTime; }
 function TrailingDirectionKey() { return `${g_stateKey}.T`; }
 function ThirdLevelResolvedKey() { return `${g_stateKey}.R`; }
@@ -299,6 +328,142 @@ function test(name, body) {
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+test('default lot mode is lot 2 and maps the nine levels to odd multiples', () => {
+  reset();
+  const match = /^input\s+ENUM_GRID_LOT_MODE\s+InpLotMode\s*=\s*(\w+)\s*;/m.exec(source);
+  assert(match && match[1] === 'GRID_LOT_ODD_MULTIPLIER', 'EA default is not the lot-2 formula');
+  assert(/^input\s+double\s+InpMaxRiskPercent\s*=\s*0\.0\s*;/m.test(source),
+    'default risk guard is not disabled');
+  const lots = Array.from({ length: 9 }, (_value, index) => LotForLevel(index + 1));
+  assert(lots.join(',') === '0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17',
+    `unexpected default lot sequence: ${lots.join(',')}`);
+});
+
+test('RSI thresholds generate raw signals strictly before trend filters', () => {
+  assert(EntrySignalFromValues(14.9, 20, 10, 15, 15, 85, 40, 0) === 1,
+    'RSI below 15 did not trigger Buy');
+  assert(EntrySignalFromValues(85.1, 20, 10, 15, 15, 85, 40, 0) === -1,
+    'RSI above 85 did not trigger Sell');
+  assert(EntrySignalFromValues(50, 20, 10, 15, 15, 85, 40, 0) === 0,
+    'RSI inside the thresholds triggered an entry');
+  assert(EntrySignalFromValues(15, 20, 10, 15, 15, 85, 40, 0) === 0 &&
+         EntrySignalFromValues(85, 20, 10, 15, 15, 85, 40, 0) === 0,
+    'RSI thresholds must remain strict');
+});
+
+test('M5 EMA trend uses the last closed price relative to EMA', () => {
+  assert(M5EMATrendDirectionFromValues(4001, 4000) === 1,
+    'price above EMA did not select the bullish trend');
+  assert(M5EMATrendDirectionFromValues(3999, 4000) === -1,
+    'price below EMA did not select the bearish trend');
+  assert(M5EMATrendDirectionFromValues(4000, 4000) === 0,
+    'price equal to EMA did not remain directionless');
+});
+
+test('M5 EMA filters opposite RSI signals but leaves the ADX grid-side mode intact', () => {
+  assert(ApplyM5EMAEntryFilter(1, 1, true) === 1,
+    'EMA bullish trend blocked an aligned Buy signal');
+  assert(ApplyM5EMAEntryFilter(-1, 1, true) === 0,
+    'EMA bullish trend allowed a counter-trend Sell signal');
+  assert(ApplyM5EMAEntryFilter(-1, -1, true) === -1,
+    'EMA bearish trend blocked an aligned Sell signal');
+  assert(ApplyM5EMAEntryFilter(1, -1, true) === 0,
+    'EMA bearish trend allowed a counter-trend Buy signal');
+  assert(ApplyM5EMAEntryFilter(1, 0, true) === 0 &&
+         ApplyM5EMAEntryFilter(-1, 0, true) === 0,
+    'EMA equality or unavailable trend did not block signals');
+  assert(ApplyM5EMAEntryFilter(1, -1, false) === 1,
+    'disabling the EMA filter changed the RSI signal');
+  assert(GridDirectionForEntrySignal(1, 40.0, 20, 10, 40) === 0,
+    'EMA filter changed the existing two-sided grid mode when ADX is weak');
+});
+
+test('RSI signals arm both sides when ADX is at or below 40', () => {
+  assert(EntrySignalFromValues(14.9, 40.0, 20, 10, 15, 85, 40, 0) === 1,
+    'weak-trend Buy signal was missed');
+  assert(GridDirectionForEntrySignal(1, 40.0, 20, 10, 40) === 0,
+    'weak-trend Buy signal did not keep both sides');
+  assert(EntrySignalFromValues(85.1, 40.0, 10, 20, 15, 85, 40, 0) === -1,
+    'weak-trend Sell signal was missed');
+  assert(GridDirectionForEntrySignal(-1, 40.0, 10, 20, 40) === 0,
+    'weak-trend Sell signal did not keep both sides');
+});
+
+test('strong ADX permits only an RSI signal aligned with DI trend and a single grid side', () => {
+  assert(EntrySignalFromValues(14.9, 40.1, 25, 10, 15, 85, 40, 0) === 1 &&
+         GridDirectionForEntrySignal(1, 40.1, 25, 10, 40) === 1,
+    'strong bullish trend did not allow a Buy-only grid');
+  assert(EntrySignalFromValues(85.1, 40.1, 25, 10, 15, 85, 40, 0) === 0 &&
+         GridDirectionForEntrySignal(-1, 40.1, 25, 10, 40) === 2,
+    'counter-trend Sell signal was not blocked');
+  assert(EntrySignalFromValues(85.1, 40.1, 10, 25, 15, 85, 40, 0) === -1 &&
+         GridDirectionForEntrySignal(-1, 40.1, 10, 25, 40) === -1,
+    'strong bearish trend did not allow a Sell-only grid');
+  assert(EntrySignalFromValues(14.9, 40.1, 10, 25, 15, 85, 40, 0) === 0 &&
+         GridDirectionForEntrySignal(1, 40.1, 10, 25, 40) === 2,
+    'counter-trend Buy signal was not blocked');
+});
+
+test('strong ADX with tied DI values blocks RSI entries because trend direction is unclear', () => {
+  assert(AdxTrendDirectionFromValues(40.1, 20, 20, 40) === 2, 'unclear strong trend was not identified');
+  assert(EntrySignalFromValues(14.9, 40.1, 20, 20, 15, 85, 40, 0) === 0 &&
+         GridDirectionForEntrySignal(1, 40.1, 20, 20, 40) === 2,
+    'entry was allowed without a clear DI direction');
+  assert(EntrySignalFromValues(15.0, 20, 25, 10, 15, 85, 40, 0) === 0,
+    'RSI threshold must remain strict');
+});
+
+test('strong bullish ADX cancels only Sell pending orders', () => {
+  reset();
+  CancelCounterTrendPendingOrders(1);
+  assert(orders.length === 10, 'wrong number of orders remain');
+  assert(orders.every((order) => order.symbol === 'EURUSD' || order.comment.startsWith('SG9|B|')),
+    'counter-trend Sell pending orders remain');
+  assert(orders.some((order) => order.symbol === 'EURUSD'), 'unrelated order was removed');
+});
+
+test('strong bearish ADX cancels only Buy pending orders', () => {
+  reset();
+  CancelCounterTrendPendingOrders(-1);
+  assert(orders.length === 10, 'wrong number of orders remain');
+  assert(orders.every((order) => order.symbol === 'EURUSD' || order.comment.startsWith('SG9|S|')),
+    'counter-trend Buy pending orders remain');
+});
+
+test('strong ADX without a clear DI direction cancels all EA pending orders', () => {
+  reset();
+  CancelCounterTrendPendingOrders(2);
+  assert(orders.length === 1 && orders[0].symbol === 'EURUSD', 'unclear trend left EA pending orders active');
+});
+
+test('session guard liquidates 15 minutes before close and whenever the symbol session is closed', () => {
+  assert(!ShouldLiquidateForSession(true, 901, 15), 'guard activated more than 15 minutes before session close');
+  assert(ShouldLiquidateForSession(true, 900, 15), 'guard missed the exact 15-minute boundary');
+  assert(ShouldLiquidateForSession(true, 899, 15), 'guard missed the final 15 minutes of a session');
+  assert(ShouldLiquidateForSession(false, 3600, 15), 'guard did not activate during a market break');
+});
+
+test('session liquidation removes EA pending orders and closes all EA positions', () => {
+  reset({ direction: 1, same: 3, opposite: 2 });
+  positions.push({ ticket: 90, symbol: _Symbol, magic: InpMagicNumber + 1,
+    type: POSITION_TYPE_BUY, comment: 'manual', sl: 0, tp: 0 });
+  assert(ManageSessionCloseState(true, true), 'active session guard did not claim the tick');
+  assert(g_sessionClosePending && globals[SessionClosePendingKey()] === 1, 'session guard was not persisted');
+  assert(positions.length === 1 && positions[0].ticket === 90, 'session guard did not close all and only EA positions');
+  assert(orders.length === 1 && orders[0].symbol === 'EURUSD', 'session guard did not remove all and only EA pending orders');
+});
+
+test('session guard retries while trading is disabled and clears only after reopening with no EA activity', () => {
+  reset({ direction: -1, same: 3, opposite: 0 });
+  ManageSessionCloseState(true, false);
+  assert(g_sessionClosePending && positions.length === 3, 'disabled trading did not preserve the retry lock');
+  assert(ManageSessionCloseState(false, true), 'reopened session with residual EA activity was not handled');
+  assert(g_sessionClosePending && positions.length === 0, 'residual positions were not closed after trading resumed');
+  assert(ManageSessionCloseState(false, true), 'clear-lock transition did not consume the tick');
+  assert(!g_sessionClosePending && !GlobalVariableCheck(SessionClosePendingKey()), 'session guard lock was not cleared');
+});
+
 function sendLevel3Fill(direction, comment = `SG9|${direction > 0 ? 'B' : 'S'}|L03`) {
   activeDeal.comment = comment;
   const trans = {
@@ -490,4 +655,4 @@ test('L03 position counting is deferred until all three positions are visible', 
   assert(orders.length === 1 && orders[0].ticket === 9999, 'the settled 3-0 case did not cancel all EA pending orders');
 });
 
-console.log(`PASS: ${passed} deterministic exit behavior scenarios`);
+console.log(`PASS: ${passed} deterministic behavior scenarios`);
