@@ -1,4 +1,18 @@
-# StopGrid exit regression checks
+# StopGrid exit checks
+
+Run the deterministic 9x9 EA behavior scenarios from the repository root:
+
+```powershell
+node MQ5/Tests/stopgrid_9x9_behavior_tests.cjs
+```
+
+This harness extracts production functions from `XAUUSD_StopGrid_9x9_EA.mq5` and checks the exact `3-0` gate and trailing behavior, fixed `3-1`/`3-2`/`3-3`/`5-4` exits in both directions, pending cancellation, and unmatched cases. It uses a mocked broker and does not replace compiling the EA or running MT5 Strategy Tester.
+
+## MT5 Strategy Tester behavior run
+
+Use `MQ5/Backtest/tester_config_stopgrid_9x9_behavior.ini` with the matching `XAUUSD_StopGrid_9x9_Behavior.set` in the terminal data folder at `MQL5/Profiles/Tester`. The preset uses XAUUSD M1 real ticks, 9 levels per side, a $2 step, and a 0.01 base lot; risk and spread guards are disabled. Its $50 anchor SL and $100 TP extension are only to let both directions' positions coexist long enough to exercise mixed-side cases; it is not a live-trading profile. Launch MT5 with `/config:<path-to-tester_config_stopgrid_9x9_behavior.ini>`; the report is written to the terminal data folder using the configured report name.
+
+## OneClick StopGrid regression checks
 
 Run from the repository root with Node.js:
 
