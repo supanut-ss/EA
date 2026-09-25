@@ -58,7 +58,7 @@ input int      InpDebugStuckHours      = 72;      // If anything stays open this
 input group "=== Opening Grid ==="
 input int      InpOrdersPerSide       = 5;       // Total levels per side; the manual entry counts as level 1 on its side
 input int      InpPriceStepCents       = 200;     // Grid distance in price cents; 200 = 2.000 (4000 -> 4002)
-input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = (2*level-1) * this, e.g. 0.01 -> 0.03, 0.05, 0.07, 0.09, ...
+input double   InpFixedLotUnit         = 0.01;    // Fixed lot unit for level >= 2; lot = level * this, e.g. 0.01 -> 0.02, 0.03, 0.04, 0.05, ...
 
 input group "=== Optional SL / TP (price distance) ==="
 input double   InpStopLossDistance     = 0.0;     // 0 = no SL; otherwise distance from each pending entry price
@@ -235,7 +235,7 @@ int OnInit()
          " | opening levels/side=", InpOrdersPerSide,
          " | step=", DoubleToString(GridStepPrice(), _Digits),
          " (", InpPriceStepCents, " cents)",
-         " | level 1 lot=manual entry lot on both sides, level>=2 lot=(2*level-1) x ",
+         " | level 1 lot=manual entry lot on both sides, level>=2 lot=level x ",
          DoubleToString(InpFixedLotUnit, 8));
    Print("OneClickGrid: MARGIN GUARD = ", InpMinMarginLevelPercent > 0.0
          ? StringFormat("reject a new grid whose fully filled levels would leave margin level below %s%%",
@@ -552,7 +552,7 @@ int TryCreateGrid(const ulong manualOrderTicket,
 
    // The manual position is level 1: any lot the user opened with. Level 2
    // and beyond use a fixed lot progression independent of the manual lot
-   // (odd multiples of InpFixedLotUnit: 3,5,7,9,... ).
+   // (level * InpFixedLotUnit: 2,3,4,5,... units).
    for(int level=2; level<=InpOrdersPerSide; level++)
      {
       double price = manualPrice + direction * (level - 1) * GridStepPrice();
@@ -789,10 +789,10 @@ double LotForLevel(const int level, const double manualLot)
   {
    // Level 1 (either side) always mirrors the manual entry's own lot.
    // Level 2+ is a fixed lot progression, independent of the manual lot:
-   // odd multiples of InpFixedLotUnit -> 3,5,7,9,11,13,15,17,...
+   // level * InpFixedLotUnit -> 2,3,4,5,... units.
    if(level <= 1)
       return(manualLot);
-   return((2 * level - 1) * InpFixedLotUnit);
+   return(level * InpFixedLotUnit);
   }
 
 //+------------------------------------------------------------------+
