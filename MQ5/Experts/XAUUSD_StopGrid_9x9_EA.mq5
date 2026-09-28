@@ -31,16 +31,17 @@ enum ENUM_OPPOSITE_MODE
 
 input group "=== Entry Signal Filters ==="
 input int                 InpRSIPeriod           = 7;
-input double              InpRSIBuyBelow         = 15.0;
-input double              InpRSISellAbove        = 85.0;
+input double              InpRSIBuyBelow         = 20.0;
+input double              InpRSISellAbove        = 80.0;
 input int                 InpADXPeriod           = 14;
-input double              InpADXStrongTrendThreshold = 40.0;
+input double              InpADXStrongTrendThreshold = 30.0;
 input bool                InpUseM5EMAFilter      = true;
-input int                 InpTrendEMAPeriod      = 200;
+input int                 InpTrendEMAPeriod      = 50;
 
 input group "=== Grid Setup ==="
 input int                 InpLevelsPerSide       = 9;          // Buy Stop and Sell Stop levels on each side.
 input double              InpGridStepPrice       = 2.0;        // Price distance per level; 2.0 means $2.00, independent of _Point.
+input double              InpFirstLevelDistance  = 2.0;        // Distance from anchor to level 1; levels 2+ still add InpGridStepPrice each.
 input double              InpFirstLevelLot       = 0.01;       // Level 1 lot; the opposite side's level 1 always matches it.
 input ENUM_GRID_LOT_MODE  InpLotMode             = GRID_LOT_ODD_MULTIPLIER;
 input string              InpCustomLotSequence  = "0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01"; // One lot per level; level 1 must match InpFirstLevelLot.
@@ -55,6 +56,7 @@ input double              InpMaxSpreadPrice      = 0.20;       // 0 disables the
 input int                 InpSlippagePoints      = 100;
 input int                 InpExpirationHours     = 0;          // 0 means GTC.
 input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
+input double              InpMaxAdverseEntrySlippagePrice = 2.0; // 0 disables the gap-fill guard; otherwise flatten if a stop fill slips this far beyond its trigger.
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
@@ -99,6 +101,7 @@ datetime g_tradeSessionRetryAfter = 0;
 bool     g_tradeSessionScheduleLoaded = false;
 bool     g_tradeSessionWarningLogged = false;
 bool     g_sessionClosePending = false;
+bool     g_gapGuardPending = false;
 
 //+------------------------------------------------------------------+
 bool ShouldLiquidateForSession(const bool isOpen,
@@ -127,6 +130,30 @@ int SessionTimeSeconds(const datetime sessionTime)
    if(!TimeToStruct(sessionTime, parts))
       return(0);
    return(parts.hour * 3600 + parts.min * 60 + parts.sec);
+  }
+
+//+------------------------------------------------------------------+
+double AdverseEntrySlippagePrice(const int direction,
+                                 const double requestedPrice,
+                                 const double fillPrice)
+  {
+   if(direction > 0)
+      return(MathMax(0.0, fillPrice - requestedPrice));
+   if(direction < 0)
+      return(MathMax(0.0, requestedPrice - fillPrice));
+   return(0.0);
+  }
+
+//+------------------------------------------------------------------+
+bool ShouldTriggerEntryGapGuard(const int direction,
+                                const double requestedPrice,
+                                const double fillPrice,
+                                const double maxAdverseSlippagePrice)
+  {
+   if(maxAdverseSlippagePrice <= 0.0)
+      return(false);
+   return(AdverseEntrySlippagePrice(direction, requestedPrice, fillPrice) >=
+          maxAdverseSlippagePrice);
   }
 
 //+------------------------------------------------------------------+
@@ -429,70 +456,6 @@ bool ReadLatestClosedM5EMATrend(int &trendDirection,
    return(true);
   }
 
-//+------------------------------------------------------------------+
-void CancelCounterTrendPendingOrders(const int trendDirection)
-  {
-   if(trendDirection == 0)
-      return;
-
-   if(trendDirection != 1 && trendDirection != -1)
-     {
-      int pendingBefore = CountOwnPendingOrders();
-      if(pendingBefore > 0)
-        {
-         DeleteAllOwnPending();
-         Print("StopGrid9: ADX is strong but DI direction is unclear; deleting all ",
-               pendingBefore, " EA pending orders.");
-        }
-      return;
-     }
-
-   string counterTrendMarker = (trendDirection > 0 ? "SG9|S|" : "SG9|B|");
-   int canceled = 0;
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
-         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
-         StringFind(OrderGetString(ORDER_COMMENT), counterTrendMarker) < 0)
-         continue;
-      bool requestSent = trade.OrderDelete(ticket);
-      if(TradeResultAccepted(requestSent, true))
-         canceled++;
-      else
-         Print("StopGrid9: failed to delete counter-trend pending order #", ticket,
-               " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-     }
-   if(canceled > 0)
-      Print("StopGrid9: ADX > ", DoubleToString(InpADXStrongTrendThreshold, 1),
-            "; deleted ", canceled, " counter-trend pending orders.");
-  }
-
-//+------------------------------------------------------------------+
-void ManageStrongAdxPendingOrders()
-  {
-   if(CountOwnPendingOrders() <= 0)
-      return;
-
-   double adxValue = 0.0;
-   double plusDiValue = 0.0;
-   double minusDiValue = 0.0;
-   if(!ReadM1ADXValues(0, adxValue, plusDiValue, minusDiValue))
-     {
-      int pendingBefore = CountOwnPendingOrders();
-      DeleteAllOwnPending();
-      Print("StopGrid9: unable to read closed M1 ADX/DI while grid is active; fail-safe deleted ",
-            pendingBefore, " EA pending orders.");
-      return;
-     }
-
-   int trendDirection = AdxTrendDirectionFromValues(adxValue, plusDiValue,
-                                                    minusDiValue, InpADXStrongTrendThreshold);
-   if(trendDirection != 0)
-      CancelCounterTrendPendingOrders(trendDirection);
-  }
-
-//+------------------------------------------------------------------+
 void SkipClosedM1EntryBars()
   {
    datetime closedBarTime = iTime(_Symbol, PERIOD_M1, 1);
@@ -567,10 +530,11 @@ int OnInit()
        InpRSIBuyBelow <= 0.0 || InpRSISellAbove >= 100.0 ||
        InpRSIBuyBelow >= InpRSISellAbove ||
        InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
-       InpGridStepPrice <= 0.0 || InpFirstLevelLot <= 0.0 ||
+       InpGridStepPrice <= 0.0 || InpFirstLevelDistance <= 0.0 || InpFirstLevelLot <= 0.0 ||
        InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
        InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
        InpSlippagePoints < 0 || InpMinutesBeforeSessionClose < 1 ||
+       InpMaxAdverseEntrySlippagePrice < 0.0 ||
       InpMaxRiskPercent < 0.0 || InpRiskSlipBufferPrice < 0.0 ||
       InpMinMarginLevelPct < 0.0 || InpRetrySeconds < 1 ||
       InpRearmDelaySeconds < 0 ||
@@ -611,6 +575,8 @@ int OnInit()
    g_stateKey = StateKey();
    if(GlobalVariableCheck(SessionClosePendingKey()))
       g_sessionClosePending = (GlobalVariableGet(SessionClosePendingKey()) > 0.5);
+   if(GlobalVariableCheck(GapGuardPendingKey()))
+      g_gapGuardPending = (GlobalVariableGet(GapGuardPendingKey()) > 0.5);
    if(GlobalVariableCheck(TrailingDirectionKey()))
      {
       double savedDirection = GlobalVariableGet(TrailingDirectionKey());
@@ -671,11 +637,10 @@ int OnInit()
       g_cycleHadActivity = true;
        g_startedOnce = true;
        Print("StopGrid9: resumed existing grid at anchor ", DoubleToString(g_anchorPrice, _Digits));
-       if(g_sessionClosePending)
+       if(g_sessionClosePending || g_gapGuardPending)
           SkipClosedM1EntryBars();
        else
          {
-          ManageStrongAdxPendingOrders();
           ManageGridExitRules();
          }
       return(INIT_SUCCEEDED);
@@ -709,6 +674,12 @@ void OnTick()
   {
    bool tradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
                         MQLInfoInteger(MQL_TRADE_ALLOWED));
+   if(g_gapGuardPending)
+     {
+      ProcessAdverseGapProtection(tradeAllowed);
+      return;
+     }
+
    bool sessionOpen = false;
    int secondsUntilSessionClose = 0;
    if(!GetSymbolTradeSessionState(TimeCurrent(), sessionOpen, secondsUntilSessionClose))
@@ -750,7 +721,6 @@ void OnTick()
        g_startedOnce = true;
        if(g_anchorPrice <= 0.0)
           g_anchorPrice = RecoverAnchorPrice();
-       ManageStrongAdxPendingOrders();
        ManageGridExitRules();
       return;
      }
@@ -830,11 +800,60 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(sourceOrder == 0 || !HistoryOrderSelect(sourceOrder))
       return;
    string orderComment = HistoryOrderGetString(sourceOrder, ORDER_COMMENT);
+
+   if(InpMaxAdverseEntrySlippagePrice > 0.0 &&
+      (trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL))
+     {
+      int fillDirection = (trans.deal_type == DEAL_TYPE_BUY ? 1 : -1);
+      double requestedPrice = HistoryOrderGetDouble(sourceOrder, ORDER_PRICE_OPEN);
+      double fillPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      double adverseSlippage = AdverseEntrySlippagePrice(fillDirection, requestedPrice, fillPrice);
+      if(ShouldTriggerEntryGapGuard(fillDirection, requestedPrice, fillPrice,
+                                    InpMaxAdverseEntrySlippagePrice))
+        {
+         SetGapGuardPending(true);
+         Print("StopGrid9: adverse stop-entry slippage ", DoubleToString(adverseSlippage, _Digits),
+               " exceeds gap guard ", DoubleToString(InpMaxAdverseEntrySlippagePrice, _Digits),
+               " | trigger=", DoubleToString(requestedPrice, _Digits),
+               " | fill=", DoubleToString(fillPrice, _Digits),
+               "; canceling EA pending orders and closing the basket.");
+        }
+     }
+
    if(StringFind(orderComment, "|L03") < 0)
       return;
 
    if(trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL)
       Print("StopGrid9: L03 fill transaction received; deferring the 3-0 check until OnTick reads settled positions.");
+  }
+
+//+------------------------------------------------------------------+
+void ProcessAdverseGapProtection(const bool tradeAllowed)
+  {
+   SkipClosedM1EntryBars();
+   if(!tradeAllowed)
+      return;
+
+   int pendingBefore = CountOwnPendingOrders();
+   if(pendingBefore > 0)
+      DeleteAllOwnPending();
+   CloseAllOwnPositions();
+   if(!HasOwnActivity())
+      SetGapGuardPending(false);
+  }
+
+//+------------------------------------------------------------------+
+void SetGapGuardPending(const bool pending)
+  {
+   g_gapGuardPending = pending;
+   if(g_stateKey == "")
+      return;
+
+   string key = GapGuardPendingKey();
+   if(pending)
+      GlobalVariableSet(key, 1.0);
+   else if(GlobalVariableCheck(key))
+      GlobalVariableDel(key);
   }
 
 //+------------------------------------------------------------------+
@@ -903,9 +922,9 @@ bool StartGrid(const int gridDirection)
         {
          double requestedLot = LotForLevel(level);
          double lot = NormalizeVolumeDown(requestedLot);
-         double entryPrice = NormalizePrice(anchor + direction * level * InpGridStepPrice);
+         double entryPrice = NormalizePrice(anchor + direction * LevelDistance(level));
          double slPrice = NormalizePrice(anchor - direction * InpStopLossBeyondAnchor);
-         double tpPrice = NormalizePrice(anchor + direction * (InpLevelsPerSide * InpGridStepPrice + InpTakeProfitBeyondLast));
+         double tpPrice = NormalizePrice(anchor + direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast));
          datetime expiration = 0;
          ENUM_ORDER_TYPE_TIME timeType = ORDER_TIME_GTC;
          if(InpExpirationHours > 0)
@@ -990,8 +1009,8 @@ bool PreflightGrid(const double anchor,
          return(false);
         }
 
-      double buyEntry = NormalizePrice(anchor + level * InpGridStepPrice);
-      double sellEntry = NormalizePrice(anchor - level * InpGridStepPrice);
+      double buyEntry = NormalizePrice(anchor + LevelDistance(level));
+      double sellEntry = NormalizePrice(anchor - LevelDistance(level));
       if((includeBuy && buyEntry <= tick.ask + minStopDistance) ||
          (includeSell && sellEntry >= tick.bid - minStopDistance))
         {
@@ -1001,8 +1020,8 @@ bool PreflightGrid(const double anchor,
 
       double buySl = NormalizePrice(anchor - InpStopLossBeyondAnchor);
       double sellSl = NormalizePrice(anchor + InpStopLossBeyondAnchor);
-      double buyTp = NormalizePrice(anchor + InpLevelsPerSide * InpGridStepPrice + InpTakeProfitBeyondLast);
-      double sellTp = NormalizePrice(anchor - InpLevelsPerSide * InpGridStepPrice - InpTakeProfitBeyondLast);
+      double buyTp = NormalizePrice(anchor + LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast);
+      double sellTp = NormalizePrice(anchor - LevelDistance(InpLevelsPerSide) - InpTakeProfitBeyondLast);
       if((includeBuy && ((buyEntry - buySl) < minStopDistance || (buyTp - buyEntry) < minStopDistance)) ||
          (includeSell && ((sellSl - sellEntry) < minStopDistance || (sellEntry - sellTp) < minStopDistance)))
         {
@@ -1129,6 +1148,14 @@ string LotModeName()
    if(InpLotMode == GRID_LOT_ODD_MULTIPLIER)
       return("odd-multiple");
    return("custom");
+  }
+
+//+------------------------------------------------------------------+
+double LevelDistance(const int level)
+  {
+   if(level <= 1)
+      return(InpFirstLevelDistance);
+   return(InpFirstLevelDistance + (level - 1) * InpGridStepPrice);
   }
 
 //+------------------------------------------------------------------+
@@ -1335,6 +1362,13 @@ void EvaluateThirdLevelCase(const int direction)
       return;
      }
 
+   if(sameSidePositions < 3 && oppositeSidePositions == 0)
+     {
+      Print("StopGrid9: L03 fill seen but only ", sameSidePositions,
+            " same-side position(s) settled so far; will re-check on the next tick.");
+      return;
+     }
+
    if(sameSidePositions != 3 || oppositeSidePositions != 0)
      {
       g_level3Evaluated = true;
@@ -1501,9 +1535,9 @@ void ManageConfiguredCase()
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                       (targetLevel * InpGridStepPrice + TRAIL_STEP_PRICE));
+                                       (LevelDistance(targetLevel) + TRAIL_STEP_PRICE));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (stopLevel * InpGridStepPrice + TRAIL_STEP_PRICE));
+                                     (LevelDistance(stopLevel) + TRAIL_STEP_PRICE));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
@@ -1708,7 +1742,7 @@ void ManageTrailingStops(const int direction)
       return;
 
    double currentPrice = (direction > 0 ? tick.bid : tick.ask);
-   double activationPrice = g_anchorPrice + direction * TRAIL_ACTIVATION_LEVEL * InpGridStepPrice;
+   double activationPrice = g_anchorPrice + direction * LevelDistance(TRAIL_ACTIVATION_LEVEL);
    double favorableMove = direction * (currentPrice - activationPrice);
    int trailSteps = 0;
    if(favorableMove > 0.0)
@@ -1716,7 +1750,7 @@ void ManageTrailingStops(const int direction)
 
    // The initial stop is level 1 plus $1.00; each $1.00 beyond level 3 advances it by $1.00.
    double targetStop = NormalizePrice(g_anchorPrice + direction *
-                                      (InpGridStepPrice + TRAIL_STEP_PRICE + trailSteps * TRAIL_STEP_PRICE));
+                                      (LevelDistance(1) + TRAIL_STEP_PRICE + trailSteps * TRAIL_STEP_PRICE));
    bool hasPosition = false;
    bool hasExistingStop = false;
    double strongestStop = 0.0;
@@ -1912,6 +1946,12 @@ string SessionClosePendingKey()
   }
 
 //+------------------------------------------------------------------+
+string GapGuardPendingKey()
+  {
+   return(g_stateKey + ".GG");
+  }
+
+//+------------------------------------------------------------------+
 string TrailingDirectionKey()
   {
    return(g_stateKey + ".T");
@@ -1948,10 +1988,13 @@ void ClearSavedAnchor()
       GlobalVariableDel(FixedCaseKey());
    if(g_stateKey != "" && GlobalVariableCheck(FixedCaseDirectionKey()))
       GlobalVariableDel(FixedCaseDirectionKey());
+   if(g_stateKey != "" && GlobalVariableCheck(GapGuardPendingKey()))
+      GlobalVariableDel(GapGuardPendingKey());
    g_trailingDirection = 0;
    g_level3Evaluated = false;
    g_fixedCaseId = 0;
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
+   g_gapGuardPending = false;
   }
 //+------------------------------------------------------------------+
