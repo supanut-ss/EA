@@ -33,8 +33,8 @@ input group "=== Entry Signal Filters ==="
 input int                 InpRSIPeriod           = 7;
 input double              InpRSIBuyBelow         = 20.0;
 input double              InpRSISellAbove        = 80.0;
-input int                 InpADXPeriod           = 14;
-input double              InpADXStrongTrendThreshold = 30.0;
+input int                 InpADXPeriod           = 18;
+input double              InpADXStrongTrendThreshold = 25.0;
 input bool                InpUseM5EMAFilter      = true;
 input int                 InpTrendEMAPeriod      = 50;
 
