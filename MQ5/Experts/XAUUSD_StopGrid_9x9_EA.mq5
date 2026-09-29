@@ -1390,6 +1390,8 @@ void EvaluateThirdLevelCase(const int direction)
 //+------------------------------------------------------------------+
 void ManageGridExitRules()
   {
+   ForceCloseGappedStops();
+
    if(g_trailingDirection != 0)
      {
       ActivateTrailing(g_trailingDirection);
@@ -1826,6 +1828,43 @@ void ManageTrailingStops(const int direction)
          Print("StopGrid9: failed to update trailing SL for position #", ticket,
                " to ", DoubleToString(targetStop, _Digits), " | retcode=", trade.ResultRetcode(),
                " ", trade.ResultRetcodeDescription());
+     }
+  }
+
+//+------------------------------------------------------------------+
+// Safety net: force-close any own position whose SL price has already been gapped
+// past (price on the wrong side of it right now) instead of relying only on the
+// broker to trigger its own stop order for it.
+void ForceCloseGappedStops()
+  {
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      double stopPrice = PositionGetDouble(POSITION_SL);
+      if(stopPrice <= 0.0)
+         continue;
+
+      ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      bool gapped = (positionType == POSITION_TYPE_BUY && tick.bid <= stopPrice) ||
+                    (positionType == POSITION_TYPE_SELL && tick.ask >= stopPrice);
+      if(!gapped)
+         continue;
+
+      bool requestSent = trade.PositionClose(ticket);
+      if(TradeResultAccepted(requestSent, false))
+         Print("StopGrid9: gap-safety closed position #", ticket,
+               " (price already past its SL ", DoubleToString(stopPrice, _Digits), ").");
+      else
+         Print("StopGrid9: gap-safety close failed for position #", ticket,
+               " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
      }
   }
 
