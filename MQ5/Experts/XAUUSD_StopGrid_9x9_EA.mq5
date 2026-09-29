@@ -91,6 +91,7 @@ int      g_fixedCaseId = 0;
 int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
 datetime g_pendingCancelRetryAfter = 0;
+datetime g_gapSafetyRetryAfter = 0;
 string   g_stateKey = "";
 
 STradeSession g_tradeSessions[MAX_TRADE_SESSIONS_PER_WEEK];
@@ -906,6 +907,7 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
    g_pendingCancelRetryAfter = 0;
+   g_gapSafetyRetryAfter = 0;
    if(GlobalVariableCheck(TrailingDirectionKey()))
       GlobalVariableDel(TrailingDirectionKey());
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
@@ -1837,6 +1839,9 @@ void ManageTrailingStops(const int direction)
 // broker to trigger its own stop order for it.
 void ForceCloseGappedStops()
   {
+   if(TimeCurrent() < g_gapSafetyRetryAfter)
+      return;
+
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
       return;
@@ -1863,8 +1868,14 @@ void ForceCloseGappedStops()
          Print("StopGrid9: gap-safety closed position #", ticket,
                " (price already past its SL ", DoubleToString(stopPrice, _Digits), ").");
       else
+        {
          Print("StopGrid9: gap-safety close failed for position #", ticket,
                " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         int retryDelay = InpRetrySeconds;
+         if(retryDelay < 5)
+            retryDelay = 5;
+         g_gapSafetyRetryAfter = TimeCurrent() + retryDelay;
+        }
      }
   }
 
@@ -2056,6 +2067,7 @@ void ClearSavedAnchor()
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
    g_pendingCancelRetryAfter = 0;
+   g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
   }
 //+------------------------------------------------------------------+
