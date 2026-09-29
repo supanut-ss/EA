@@ -66,7 +66,7 @@ input ulong               InpMagicNumber         = 20260925;
 input group "=== Risk Guards ==="
 input double              InpMaxRiskPercent      = 0.0;        // Reject the grid when modeled conservative anchor-stop risk exceeds this % of equity; 0 disables.
 input double              InpRiskSlipBufferPrice = 0.05;       // Extra adverse close-price buffer used only by the risk estimate.
-input double              InpMinMarginLevelPct   = 300.0;      // Projected margin level after all pending orders fill; 0 disables.
+input double              InpMinMarginLevelPct   = 0.0;        // Projected margin level after all pending orders fill; 0 disables.
 input int                 InpRetrySeconds        = 30;
 
 struct STradeSession
@@ -96,6 +96,7 @@ int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
 datetime g_pendingCancelRetryAfter = 0;
 ulong    g_manualTicket = 0;
+datetime g_manualArmRetryAfter = 0;
 ulong    g_manualOppositeTicket = 0;
 double   g_manualLevel1Lot = 0.0;
 string   g_stateKey = "";
@@ -763,6 +764,9 @@ void OnTick()
       return;
      }
 
+   if(TimeCurrent() < g_manualArmRetryAfter)
+      return;
+
    ulong manualTicket = 0;
    int manualDirection = 0;
    double manualLot = 0.0;
@@ -778,7 +782,14 @@ void OnTick()
    if(ArmGridFromManual(manualTicket, manualDirection, manualLot, manualPrice))
       g_startedOnce = true;
    else
-      Print("StopGrid9-Manual: could not arm the grid around this manual order; leaving it untouched and will retry.");
+     {
+      int retryDelay = InpRetrySeconds;
+      if(retryDelay < 5)
+         retryDelay = 5;
+      g_manualArmRetryAfter = TimeCurrent() + retryDelay;
+      Print("StopGrid9-Manual: could not arm the grid around this manual order; leaving it untouched and will retry in ",
+            retryDelay, "s.");
+     }
   }
 
 //+------------------------------------------------------------------+
