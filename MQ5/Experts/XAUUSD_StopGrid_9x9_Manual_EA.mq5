@@ -97,7 +97,7 @@ datetime g_fixedCaseCloseRetryAfter = 0;
 datetime g_pendingCancelRetryAfter = 0;
 ulong    g_manualTicket = 0;
 ulong    g_manualOppositeTicket = 0;
-double   g_manualLotRatio = 1.0;
+double   g_manualLevel1Lot = 0.0;
 string   g_stateKey = "";
 
 STradeSession g_tradeSessions[MAX_TRADE_SESSIONS_PER_WEEK];
@@ -969,14 +969,17 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
    // at market: it only becomes a real position once price actually reaches that level,
    // just like every other level.
    double anchor = NormalizePrice(manualPrice - manualDirection * LevelDistance(1));
-   g_manualLotRatio = manualLot / InpFirstLevelLot;
+   // Level 1 (both sides) uses the manual lot exactly; Levels 2..N stay fixed to
+   // InpFirstLevelLot's own progression (odd-multiplier/equal/custom), unrelated to
+   // whatever lot the user happened to click.
+   g_manualLevel1Lot = manualLot;
 
    double modeledRisk = 0.0;
    double projectedMargin = 0.0;
    double projectedMarginLevel = 0.0;
    if(!PreflightGrid(anchor, 0, modeledRisk, projectedMargin, projectedMarginLevel, true))
      {
-      g_manualLotRatio = 1.0;
+      g_manualLevel1Lot = 0.0;
       return(false);
      }
 
@@ -1060,8 +1063,8 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
    g_cycleHadActivity = true;
    g_startedOnce = true;
    Print("StopGrid9-Manual: grid armed around manual Level 1 | anchor=", DoubleToString(anchor, _Digits),
-         " | manual lot=", DoubleToString(manualLot, VolumeDigits()),
-         " | lot ratio vs InpFirstLevelLot=", DoubleToString(g_manualLotRatio, 4),
+         " | Level 1 lot (both sides)=", DoubleToString(manualLot, VolumeDigits()),
+         " | Levels 2-", InpLevelsPerSide, " use InpFirstLevelLot's own progression",
          " | placed ", placedCount, " pending orders (opposite side Level 1, plus levels 2-",
          InpLevelsPerSide, " both sides).");
    return(true);
@@ -1315,14 +1318,17 @@ bool PreflightGrid(const double anchor,
 //+------------------------------------------------------------------+
 double LotForLevel(const int level)
   {
-   // InpFirstLevelLot only defines the shape of the progression (equal / odd-multiplier /
-   // custom); every level scales by g_manualLotRatio = (the user's manual Level 1 lot) /
-   // InpFirstLevelLot, so the grid's actual size follows whatever lot the user clicked.
-   if(InpLotMode == GRID_LOT_EQUAL || level <= 1)
-      return(InpFirstLevelLot * g_manualLotRatio);
+   // Level 1 (both sides) always uses whatever lot the user manually clicked, regardless
+   // of InpFirstLevelLot. Levels 2..N stay fixed to InpFirstLevelLot's own progression
+   // (equal / odd-multiplier / custom) - same absolute lots the auto EA would use -
+   // unrelated to the manual lot.
+   if(level <= 1)
+      return(g_manualLevel1Lot > 0.0 ? g_manualLevel1Lot : InpFirstLevelLot);
+   if(InpLotMode == GRID_LOT_EQUAL)
+      return(InpFirstLevelLot);
    if(InpLotMode == GRID_LOT_CUSTOM)
-      return(g_customLots[level - 1] * g_manualLotRatio);
-   return(InpFirstLevelLot * (2 * level - 1) * g_manualLotRatio);
+      return(g_customLots[level - 1]);
+   return(InpFirstLevelLot * (2 * level - 1));
   }
 
 //+------------------------------------------------------------------+
@@ -2290,6 +2296,6 @@ void ClearSavedAnchor()
    g_gapGuardPending = false;
    g_manualTicket = 0;
    g_manualOppositeTicket = 0;
-   g_manualLotRatio = 1.0;
+   g_manualLevel1Lot = 0.0;
   }
 //+------------------------------------------------------------------+
