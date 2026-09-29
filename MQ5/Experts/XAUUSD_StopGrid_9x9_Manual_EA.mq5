@@ -1771,8 +1771,11 @@ void ManageConfiguredCase()
       int pendingBeforeTarget = CountOwnPendingOrders();
       if(pendingBeforeTarget > 0 && PendingCancelRetryDue())
          DeleteAllOwnPending();
-      if(!AllMainPositionsHaveCaseTakeProfit(g_fixedCaseDirection, targetPrice))
-         RetryCloseCaseBasket("TP target was reached before every main-side position had that TP");
+      // Close both baskets together right when the target is touched, rather than
+      // waiting on each main-side position's own TP order to fill independently (which
+      // left the opposite-side basket open with no SL of its own for however long that
+      // took, or indefinitely if a TP modify had failed).
+      RetryCloseCaseBasket("target price reached");
       return;
      }
 
@@ -1922,8 +1925,9 @@ void RetryCloseCaseBasket(const string reason)
       retryDelay = 30;
    g_fixedCaseCloseRetryAfter = TimeCurrent() + retryDelay;
    Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), "; ", reason,
-         "; retrying a main-side basket close.");
+         "; closing both the main-side and opposite-side baskets together.");
    ClosePositionsByDirection(g_fixedCaseDirection);
+   ClosePositionsByDirection(-g_fixedCaseDirection);
   }
 
 //+------------------------------------------------------------------+
