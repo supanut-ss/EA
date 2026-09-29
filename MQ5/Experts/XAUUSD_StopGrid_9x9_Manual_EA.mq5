@@ -898,26 +898,10 @@ bool DetectManualTriggerPosition(ulong &ticket, int &direction, double &volume, 
   }
 
 //+------------------------------------------------------------------+
-// Used for Levels 2..N: they fill LevelDistance(level) away from anchor via a pending
-// stop order, so an SL sitting right at the anchor is already a valid distance from entry.
-void ApplyAnchorStopLoss(const ulong ticket, const int direction, const double anchor)
-  {
-   if(ticket == 0 || (direction != 1 && direction != -1) || !PositionSelectByTicket(ticket))
-      return;
-
-   double slPrice = NormalizePrice(anchor - direction * InpStopLossBeyondAnchor);
-   double tpPrice = NormalizePrice(anchor + direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast));
-   bool requestSent = trade.PositionModify(ticket, slPrice, tpPrice);
-   if(!TradeResultAccepted(requestSent, false))
-      Print("StopGrid9-Manual: failed to set SL/TP for position #", ticket,
-            " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-  }
-
-//+------------------------------------------------------------------+
-// By design the manual Level 1 fill carries no SL (its entry IS the anchor, so an
-// anchor-based SL would sit at zero distance from it and be rejected anyway) - only a TP
-// is set for it, matching every other level's target.
-void ApplyLevel1TakeProfitOnly(const ulong ticket, const int direction, const double anchor)
+// By design NO leg (Level 1..N, either side) carries an anchor-based SL - only a TP is
+// set at placement. SL is decided later by the case logic once Level 3 resolves which
+// pattern applies (3-0 trailing, or one of the fixed 3-x cases), not up front.
+void ApplyTakeProfitOnly(const ulong ticket, const int direction, const double anchor)
   {
    if(ticket == 0 || (direction != 1 && direction != -1) || !PositionSelectByTicket(ticket))
       return;
@@ -927,32 +911,6 @@ void ApplyLevel1TakeProfitOnly(const ulong ticket, const int direction, const do
    if(!TradeResultAccepted(requestSent, false))
       Print("StopGrid9-Manual: failed to set TP for the manual Level 1 position #", ticket,
             " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-  }
-
-//+------------------------------------------------------------------+
-// Retries the SL/TP setup every tick for any own position that still has no SL, except
-// the manual Level 1 ticket (which never gets one - see ApplyLevel1TakeProfitOnly). A
-// broker's minimum-stop-distance can occasionally reject a modify once right after a
-// fill; positions that already carry an SL (anchor-based, trailing, or case-based) are
-// left untouched.
-void EnsureAnchorStopLossSet()
-  {
-   if(g_anchorPrice <= 0.0)
-      return;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol || !IsOwnPosition(ticket) ||
-         ticket == g_manualTicket)
-         continue;
-      if(PositionGetDouble(POSITION_SL) > 0.0)
-         continue;
-
-      ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      int direction = (positionType == POSITION_TYPE_BUY ? 1 : -1);
-      ApplyAnchorStopLoss(ticket, direction, g_anchorPrice);
-     }
   }
 
 //+------------------------------------------------------------------+
@@ -1023,7 +981,7 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
    GlobalVariableSet(ManualTicketKey(), (double)g_manualTicket);
    GlobalVariableSet(ManualOppositeTicketKey(), (double)g_manualOppositeTicket);
 
-   ApplyLevel1TakeProfitOnly(manualTicket, manualDirection, anchor);
+   ApplyTakeProfitOnly(manualTicket, manualDirection, anchor);
 
    ulong placedTickets[];
    ArrayResize(placedTickets, 2 * InpLevelsPerSide);
@@ -1038,7 +996,7 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
          double requestedLot = LotForLevel(level);
          double lot = NormalizeVolumeDown(requestedLot);
          double entryPrice = NormalizePrice(anchor + direction * LevelDistance(level));
-         double slPrice = NormalizePrice(anchor - direction * InpStopLossBeyondAnchor);
+         double slPrice = 0.0; // no SL up front anywhere - the case logic assigns one once Level 3 resolves.
          double tpPrice = NormalizePrice(anchor + direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast));
          datetime expiration = 0;
          ENUM_ORDER_TYPE_TIME timeType = ORDER_TIME_GTC;
@@ -1627,7 +1585,6 @@ void EvaluateThirdLevelCase(const int direction)
 //+------------------------------------------------------------------+
 void ManageGridExitRules()
   {
-   EnsureAnchorStopLossSet();
    ForceCloseGappedStops();
 
    if(g_trailingDirection != 0)
