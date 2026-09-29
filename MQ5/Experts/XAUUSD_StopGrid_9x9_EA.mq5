@@ -90,6 +90,7 @@ bool     g_level3Evaluated = false;
 int      g_fixedCaseId = 0;
 int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
+datetime g_pendingCancelRetryAfter = 0;
 string   g_stateKey = "";
 
 STradeSession g_tradeSessions[MAX_TRADE_SESSIONS_PER_WEEK];
@@ -297,7 +298,8 @@ bool ManageSessionCloseState(const bool closeWindowActive,
       SetSessionClosePending(true);
       if(tradeAllowed && HasOwnActivity())
         {
-         DeleteAllOwnPending();
+         if(PendingCancelRetryDue())
+            DeleteAllOwnPending();
          CloseAllOwnPositions();
         }
       return(true);
@@ -311,7 +313,8 @@ bool ManageSessionCloseState(const bool closeWindowActive,
      {
       if(tradeAllowed)
         {
-         DeleteAllOwnPending();
+         if(PendingCancelRetryDue())
+            DeleteAllOwnPending();
          CloseAllOwnPositions();
         }
       return(true);
@@ -696,7 +699,8 @@ void OnTick()
          g_startedOnce = true;
          if(g_anchorPrice <= 0.0)
             g_anchorPrice = RecoverAnchorPrice();
-         DeleteAllOwnPending();
+         if(PendingCancelRetryDue())
+            DeleteAllOwnPending();
          ManageGridExitRules();
         }
       return;
@@ -835,7 +839,7 @@ void ProcessAdverseGapProtection(const bool tradeAllowed)
       return;
 
    int pendingBefore = CountOwnPendingOrders();
-   if(pendingBefore > 0)
+   if(pendingBefore > 0 && PendingCancelRetryDue())
       DeleteAllOwnPending();
    CloseAllOwnPositions();
    if(!HasOwnActivity())
@@ -901,6 +905,7 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseId = 0;
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
+   g_pendingCancelRetryAfter = 0;
    if(GlobalVariableCheck(TrailingDirectionKey()))
       GlobalVariableDel(TrailingDirectionKey());
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
@@ -1548,7 +1553,7 @@ void ManageConfiguredCase()
    if(targetReached)
      {
       int pendingBeforeTarget = CountOwnPendingOrders();
-      if(pendingBeforeTarget > 0)
+      if(pendingBeforeTarget > 0 && PendingCancelRetryDue())
          DeleteAllOwnPending();
       if(!AllMainPositionsHaveCaseTakeProfit(g_fixedCaseDirection, targetPrice))
          RetryCloseCaseBasket("TP target was reached before every main-side position had that TP");
@@ -1561,7 +1566,7 @@ void ManageConfiguredCase()
       return;
 
    int pendingBefore = CountOwnPendingOrders();
-   if(pendingBefore > 0)
+   if(pendingBefore > 0 && PendingCancelRetryDue())
      {
       DeleteAllOwnPending();
       Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " target L",
@@ -1722,7 +1727,7 @@ void ActivateTrailing(const int detectedDirection)
       return;
 
    int pendingBefore = CountOwnPendingOrders();
-   if(pendingBefore > 0)
+   if(pendingBefore > 0 && PendingCancelRetryDue())
      {
       DeleteAllOwnPending();
       Print("StopGrid9: 3-0 pending cancellation requested; own pending orders ",
@@ -1872,8 +1877,24 @@ void RollbackGrid(ulong &placedTickets[], const int placedCount)
   }
 
 //+------------------------------------------------------------------+
+// Gate for repeated per-tick pending-cancel attempts: once a cancel attempt
+// fails (e.g. broker retcode 10013 near a session boundary), back off for
+// InpRetrySeconds instead of hammering OrderSend every tick until it works.
+bool PendingCancelRetryDue()
+  {
+   if(TimeCurrent() < g_pendingCancelRetryAfter)
+      return(false);
+   int retryDelay = InpRetrySeconds;
+   if(retryDelay < 5)
+      retryDelay = 5;
+   g_pendingCancelRetryAfter = TimeCurrent() + retryDelay;
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
 void DeleteAllOwnPending()
   {
+   bool anyFailed = false;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong ticket = OrderGetTicket(i);
@@ -1882,9 +1903,14 @@ void DeleteAllOwnPending()
          continue;
       bool requestSent = trade.OrderDelete(ticket);
       if(!TradeResultAccepted(requestSent, true))
+        {
+         anyFailed = true;
          Print("StopGrid9: failed to delete pending order #", ticket,
                " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+        }
      }
+   if(anyFailed)
+      g_pendingCancelRetryAfter = TimeCurrent() + (InpRetrySeconds < 5 ? 5 : InpRetrySeconds);
   }
 
 //+------------------------------------------------------------------+
@@ -1995,6 +2021,7 @@ void ClearSavedAnchor()
    g_fixedCaseId = 0;
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
+   g_pendingCancelRetryAfter = 0;
    g_gapGuardPending = false;
   }
 //+------------------------------------------------------------------+
