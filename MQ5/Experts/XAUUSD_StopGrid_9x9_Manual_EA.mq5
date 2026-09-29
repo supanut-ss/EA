@@ -97,6 +97,7 @@ datetime g_fixedCaseCloseRetryAfter = 0;
 datetime g_pendingCancelRetryAfter = 0;
 datetime g_gapSafetyRetryAfter = 0;
 ulong    g_manualTicket = 0;
+int      g_manualDirection = 0;
 datetime g_manualArmRetryAfter = 0;
 ulong    g_manualOppositeTicket = 0;
 double   g_manualLevel1Lot = 0.0;
@@ -587,6 +588,8 @@ int OnInit()
    g_stateKey = StateKey();
    if(GlobalVariableCheck(ManualTicketKey()))
       g_manualTicket = (ulong)GlobalVariableGet(ManualTicketKey());
+   if(GlobalVariableCheck(ManualDirectionKey()))
+      g_manualDirection = (int)GlobalVariableGet(ManualDirectionKey());
    if(GlobalVariableCheck(ManualOppositeTicketKey()))
       g_manualOppositeTicket = (ulong)GlobalVariableGet(ManualOppositeTicketKey());
    if(GlobalVariableCheck(SessionClosePendingKey()))
@@ -973,6 +976,7 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
    int oppositeDirection = -manualDirection;
 
    g_manualTicket = manualTicket;
+   g_manualDirection = manualDirection;
    g_manualOppositeTicket = 0;
    g_anchorPrice = anchor;
    g_trailingDirection = 0;
@@ -992,6 +996,7 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
       GlobalVariableDel(FixedCaseDirectionKey());
    GlobalVariableSet(g_stateKey, g_anchorPrice);
    GlobalVariableSet(ManualTicketKey(), (double)g_manualTicket);
+   GlobalVariableSet(ManualDirectionKey(), (double)g_manualDirection);
    GlobalVariableSet(ManualOppositeTicketKey(), (double)g_manualOppositeTicket);
 
    ApplyTakeProfitOnly(manualTicket, manualDirection, anchor);
@@ -1378,6 +1383,20 @@ double LevelDistance(const int level)
   }
 
 //+------------------------------------------------------------------+
+// The manual side's own Level 1 sits AT the anchor (distance 0), not LevelDistance(1)
+// away like every pending Level 1 on the opposite side does - so every level price
+// formula that operates on a given direction (trailing activation/target, fixed-case
+// target/stop) must shift by LevelDistance(1) whenever that direction is the manual
+// side, or it ends up one full LevelDistance(1) step ahead of where those positions
+// actually are (e.g. trailing staying frozen until price re-covers that phantom gap).
+double EffectiveLevelDistance(const int direction, const int level)
+  {
+   if(direction == g_manualDirection)
+      return(LevelDistance(level) - LevelDistance(1));
+   return(LevelDistance(level));
+  }
+
+//+------------------------------------------------------------------+
 double NormalizePrice(const double price)
   {
    if(g_tickSize <= 0.0)
@@ -1756,9 +1775,9 @@ void ManageConfiguredCase()
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                       (LevelDistance(targetLevel) + TRAIL_STEP_PRICE));
+                                       (EffectiveLevelDistance(g_fixedCaseDirection, targetLevel) + TRAIL_STEP_PRICE));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (LevelDistance(stopLevel) + TRAIL_STEP_PRICE));
+                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + TRAIL_STEP_PRICE));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
@@ -1967,7 +1986,7 @@ void ManageTrailingStops(const int direction)
       return;
 
    double currentPrice = (direction > 0 ? tick.bid : tick.ask);
-   double activationPrice = g_anchorPrice + direction * LevelDistance(TRAIL_ACTIVATION_LEVEL);
+   double activationPrice = g_anchorPrice + direction * EffectiveLevelDistance(direction, TRAIL_ACTIVATION_LEVEL);
    double favorableMove = direction * (currentPrice - activationPrice);
    int trailSteps = 0;
    if(favorableMove > 0.0)
@@ -1975,7 +1994,7 @@ void ManageTrailingStops(const int direction)
 
    // The initial stop is level 1 plus $1.00; each $1.00 beyond level 3 advances it by $1.00.
    double targetStop = NormalizePrice(g_anchorPrice + direction *
-                                      (LevelDistance(1) + TRAIL_STEP_PRICE + trailSteps * TRAIL_STEP_PRICE));
+                                      (EffectiveLevelDistance(direction, 1) + TRAIL_STEP_PRICE + trailSteps * TRAIL_STEP_PRICE));
    bool hasPosition = false;
    bool hasExistingStop = false;
    double strongestStop = 0.0;
@@ -2269,6 +2288,12 @@ string ManualTicketKey()
   }
 
 //+------------------------------------------------------------------+
+string ManualDirectionKey()
+  {
+   return(g_stateKey + ".MDIR");
+  }
+
+//+------------------------------------------------------------------+
 string ManualOppositeTicketKey()
   {
    return(g_stateKey + ".MO");
@@ -2291,6 +2316,8 @@ void ClearSavedAnchor()
       GlobalVariableDel(GapGuardPendingKey());
    if(g_stateKey != "" && GlobalVariableCheck(ManualTicketKey()))
       GlobalVariableDel(ManualTicketKey());
+   if(g_stateKey != "" && GlobalVariableCheck(ManualDirectionKey()))
+      GlobalVariableDel(ManualDirectionKey());
    if(g_stateKey != "" && GlobalVariableCheck(ManualOppositeTicketKey()))
       GlobalVariableDel(ManualOppositeTicketKey());
    g_trailingDirection = 0;
@@ -2302,6 +2329,7 @@ void ClearSavedAnchor()
    g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
    g_manualTicket = 0;
+   g_manualDirection = 0;
    g_manualOppositeTicket = 0;
    g_manualLevel1Lot = 0.0;
   }
