@@ -1795,14 +1795,9 @@ void ManageTrailingStops(const int direction)
          targetStop = MathMin(targetStop, strongestStop);
      }
 
-   if((direction > 0 && currentPrice <= targetStop) ||
-      (direction < 0 && currentPrice >= targetStop))
-     {
-      Print("StopGrid9: price crossed the active trailing stop; closing the remaining positions on that side.");
-      ClosePositionsByDirection(direction);
-      return;
-     }
-
+   // Exit is left entirely to the broker-side SL set below (PositionModify), not a
+   // manual price-cross close here: racing our own market-close against the broker's
+   // own stop trigger caused duplicate-request failures and could delay the exit.
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
