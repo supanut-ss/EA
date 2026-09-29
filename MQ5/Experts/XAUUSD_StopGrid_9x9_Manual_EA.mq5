@@ -1006,7 +1006,12 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
         {
          double requestedLot = LotForLevel(level);
          double lot = NormalizeVolumeDown(requestedLot);
-         double entryPrice = NormalizePrice(anchor + direction * LevelDistance(level));
+         // The manual side's own Level 1 sits AT the anchor (distance 0), not
+         // LevelDistance(1) away like a normal pending Level 1 would - so its Levels 2..N
+         // are shifted back by LevelDistance(1) too, keeping the same step-sized gap
+         // between consecutive levels (200pts by default) that the opposite side gets.
+         double levelDistance = (sideIndex == 0 ? LevelDistance(level) - LevelDistance(1) : LevelDistance(level));
+         double entryPrice = NormalizePrice(anchor + direction * levelDistance);
          double slPrice = 0.0; // no SL up front anywhere - the case logic assigns one once Level 3 resolves.
          double tpPrice = NormalizePrice(anchor + direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast));
          datetime expiration = 0;
