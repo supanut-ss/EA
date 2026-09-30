@@ -19,6 +19,7 @@ CTrade trade;
 #define MAX_TRADE_SESSIONS_PER_WEEK (7 * MAX_TRADE_SESSIONS_PER_DAY)
 #define TRAIL_ACTIVATION_LEVEL 3
 #define TRAIL_STEP_PRICE 1.0
+#define CASE_EXIT_BUFFER_PRICE 0.5
 #define GAP_SAFETY_RETRY_SECONDS 2
 
 enum ENUM_GRID_LOT_MODE
@@ -1812,9 +1813,9 @@ void ManageConfiguredCase()
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                       (EffectiveLevelDistance(g_fixedCaseDirection, targetLevel) + TRAIL_STEP_PRICE));
+                                       (EffectiveLevelDistance(g_fixedCaseDirection, targetLevel) + CASE_EXIT_BUFFER_PRICE));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + TRAIL_STEP_PRICE));
+                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + CASE_EXIT_BUFFER_PRICE));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
