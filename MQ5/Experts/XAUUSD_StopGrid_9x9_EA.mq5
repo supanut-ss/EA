@@ -1744,10 +1744,10 @@ void RetryCloseCaseBasket(const string reason)
   {
    if(TimeCurrent() < g_fixedCaseCloseRetryAfter)
       return;
-   int retryDelay = InpRetrySeconds;
-   if(retryDelay < 30)
-      retryDelay = 30;
-   g_fixedCaseCloseRetryAfter = TimeCurrent() + retryDelay;
+   // Deliberately short and independent of InpRetrySeconds, same reasoning as
+   // GAP_SAFETY_RETRY_SECONDS: whichever side of this basket hasn't closed yet has no
+   // SL of its own, so a stuck close here must retry fast, not wait 30s+.
+   g_fixedCaseCloseRetryAfter = TimeCurrent() + GAP_SAFETY_RETRY_SECONDS;
    Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), "; ", reason,
          "; closing both the main-side and opposite-side baskets together.");
    ClosePositionsByDirection(g_fixedCaseDirection);
