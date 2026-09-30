@@ -1704,9 +1704,13 @@ void SetConfiguredCaseStopLoss(const int direction, const double stopPrice)
    if((direction > 0 && currentPrice <= stopPrice) ||
       (direction < 0 && currentPrice >= stopPrice))
      {
-      if(allPositionsProtected)
-         return; // The server-side fixed SL will close these positions when the market can execute it.
-      RetryCloseCaseBasket("fixed SL was crossed before every position was protected");
+      // Always close both baskets ourselves here, even when every main-side position
+      // already has its own SL set (allPositionsProtected): the broker's native SL only
+      // knows how to close the main side, it has no notion of the paired opposite-side
+      // basket, which would otherwise be left open with no SL of its own indefinitely.
+      RetryCloseCaseBasket(allPositionsProtected ?
+                           "fixed SL was crossed" :
+                           "fixed SL was crossed before every position was protected");
       return;
      }
 
