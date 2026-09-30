@@ -1815,7 +1815,7 @@ void ManageConfiguredCase()
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
                                        (EffectiveLevelDistance(g_fixedCaseDirection, targetLevel) + CASE_EXIT_BUFFER_PRICE));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + CASE_EXIT_BUFFER_PRICE));
+                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + TRAIL_STEP_PRICE));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
