@@ -85,6 +85,7 @@ datetime g_lastM1SignalBarTime = 0;
 double   g_anchorPrice = 0.0;
 datetime g_retryAfter = 0;
 bool     g_cycleHadActivity = false;
+bool     g_cycleHadFilledPosition = false;
 bool     g_startedOnce = false;
 int      g_trailingDirection = 0;
 bool     g_level3Evaluated = false;
@@ -909,6 +910,7 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseCloseRetryAfter = 0;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
+   g_cycleHadFilledPosition = false;
    if(GlobalVariableCheck(TrailingDirectionKey()))
       GlobalVariableDel(TrailingDirectionKey());
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
@@ -1391,8 +1393,41 @@ void EvaluateThirdLevelCase(const int direction)
   }
 
 //+------------------------------------------------------------------+
+// If the basket ever had a filled position this cycle (Level 1+ opened) and later goes
+// back to zero open positions (stopped/closed out) while pending orders from the same
+// cycle remain, those pendings no longer belong to a coherent grid - cancel them instead
+// of leaving them to fill later disconnected from any level/case tracking.
+void CancelPendingIfBasketFlat()
+  {
+   // Only acts once Level 3 has been resolved into a case (trailing or fixed 3-x): before
+   // that, 0 positions on one side while pendings remain is the grid's normal hedge-
+   // building phase (e.g. one side's early level got stopped out before the other side
+   // ever filled) and those pendings must stay armed for the strategy to work at all.
+   if(!g_level3Evaluated)
+      return;
+
+   int openPositions = CountOwnPositionsByDirection(1) + CountOwnPositionsByDirection(-1);
+   if(openPositions > 0)
+     {
+      g_cycleHadFilledPosition = true;
+      return;
+     }
+   if(!g_cycleHadFilledPosition)
+      return;
+
+   int pendingCount = CountOwnPendingOrders();
+   if(pendingCount > 0 && PendingCancelRetryDue())
+     {
+      DeleteAllOwnPending();
+      Print("StopGrid9: basket is flat (0 open positions) after Level 1 had already filled this cycle; "
+            "canceling ", pendingCount, " leftover pending order(s).");
+     }
+  }
+
+//+------------------------------------------------------------------+
 void ManageGridExitRules()
   {
+   CancelPendingIfBasketFlat();
    ForceCloseGappedStops();
 
    if(g_trailingDirection != 0)
@@ -2074,5 +2109,6 @@ void ClearSavedAnchor()
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
+   g_cycleHadFilledPosition = false;
   }
 //+------------------------------------------------------------------+
