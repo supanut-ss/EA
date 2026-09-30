@@ -14,8 +14,6 @@ CTrade trade;
 #define MAX_TRADE_SESSIONS_PER_DAY 64
 #define MAX_TRADE_SESSIONS_PER_WEEK (7 * MAX_TRADE_SESSIONS_PER_DAY)
 #define TRAIL_ACTIVATION_LEVEL 3
-#define TRAIL_STEP_PRICE 1.0
-#define CASE_EXIT_BUFFER_PRICE 0.5
 #define GAP_SAFETY_RETRY_SECONDS 2
 
 enum ENUM_GRID_LOT_MODE
@@ -59,6 +57,8 @@ input int                 InpSlippagePoints      = 100;
 input int                 InpExpirationHours     = 0;          // 0 means GTC.
 input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
 input double              InpMaxAdverseEntrySlippagePrice = 2.0; // 0 disables the gap-fill guard; otherwise flatten if a stop fill slips this far beyond its trigger.
+input double              InpTrailStepPrice      = 1.0;        // 3-0 trailing stop's initial offset and per-$ advance step.
+input double              InpCaseExitBufferPrice = 0.5;        // Extra distance added to a fixed case's target (TP) price beyond its level.
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
@@ -542,6 +542,7 @@ int OnInit()
        InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
        InpSlippagePoints < 0 || InpMinutesBeforeSessionClose < 1 ||
        InpMaxAdverseEntrySlippagePrice < 0.0 ||
+       InpTrailStepPrice <= 0.0 || InpCaseExitBufferPrice <= 0.0 ||
       InpMaxRiskPercent < 0.0 || InpRiskSlipBufferPrice < 0.0 ||
       InpMinMarginLevelPct < 0.0 || InpRetrySeconds < 1 ||
       InpRearmDelaySeconds < 0 ||
@@ -1581,9 +1582,9 @@ void ManageConfiguredCase()
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                       (LevelDistance(targetLevel) + CASE_EXIT_BUFFER_PRICE));
+                                       (LevelDistance(targetLevel) + InpCaseExitBufferPrice));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (LevelDistance(stopLevel) + TRAIL_STEP_PRICE));
+                                     (LevelDistance(stopLevel) + InpTrailStepPrice));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
@@ -1800,11 +1801,11 @@ void ManageTrailingStops(const int direction)
    double favorableMove = direction * (currentPrice - activationPrice);
    int trailSteps = 0;
    if(favorableMove > 0.0)
-      trailSteps = (int)MathFloor(favorableMove / TRAIL_STEP_PRICE + 0.000000001);
+      trailSteps = (int)MathFloor(favorableMove / InpTrailStepPrice + 0.000000001);
 
    // The initial stop is level 1 plus $1.00; each $1.00 beyond level 3 advances it by $1.00.
    double targetStop = NormalizePrice(g_anchorPrice + direction *
-                                      (LevelDistance(1) + TRAIL_STEP_PRICE + trailSteps * TRAIL_STEP_PRICE));
+                                      (LevelDistance(1) + InpTrailStepPrice + trailSteps * InpTrailStepPrice));
    bool hasPosition = false;
    bool hasExistingStop = false;
    double strongestStop = 0.0;
