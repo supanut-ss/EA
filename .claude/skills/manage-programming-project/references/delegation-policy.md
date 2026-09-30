@@ -4,56 +4,68 @@
 
 | Model | Assign when | Avoid when |
 | --- | --- | --- |
-| `gpt-6-astra` | Exceptionally demanding architecture, severe ambiguity, cross-system failure analysis, and high-consequence design or security review | Routine implementation, mechanical work, or a second review that adds no meaningful confidence |
-| `gpt-6-sol` | Project leadership, architecture, ambiguous requirements, complex implementation, difficult debugging, security-sensitive changes, integration, code review, and final verification | A faster model can complete a fully specified, low-risk subtask without increasing integration risk |
-| `gpt-6-luna` | Fast repository searches, inventory, simple test additions, mechanical edits, formatting, small documentation updates, and reproducible command checks | Ambiguous logic, architecture, security decisions, difficult debugging, or final approval |
+| `haiku` (Haiku 4.5) | Repository searches, file inventory, mechanical edits, formatting, small isolated tests or docs, reproducible command checks | Ambiguous logic, architecture, security decisions, difficult debugging, final approval |
+| `sonnet` (Sonnet 5.5) | Default leader and workhorse: routine-to-complex implementation, debugging, tests, integration, review, final verification | A cheaper model can finish a fully specified subtask, or the work needs deeper reasoning |
+| `opus` (Opus 5.5) | Hard architecture, ambiguous requirements, cross-system failure analysis, security-sensitive or high-risk design review | Routine implementation, mechanical work, or a duplicate review that adds no confidence |
+| `fable` (Fable 5.1) | Rare last resort for very high-consequence decisions still unresolved after Opus at high effort | Anything Opus can resolve; never the default |
 
-Prefer the inherited model unless a different model materially improves cost, speed, or quality. Use only model identifiers actually exposed by the runtime.
+Prefer the inherited model unless another one materially improves cost, speed, or quality. Use only model identifiers the runtime exposes.
 
 ## Effort selection
 
 | Effort | Use for | Examples |
 | --- | --- | --- |
-| `low` | Deterministic, narrow, low-risk work | Locate symbols, list impacted files, rename a local identifier, update a small comment |
-| `medium` | Routine engineering with clear patterns | Add unit tests, implement a small endpoint, ordinary refactor, update typed models |
-| `high` | Complex reasoning or meaningful integration risk | Multi-file feature, nondeterministic bug, concurrency issue, auth change, database behavior |
-| `xhigh` | Architecture or hard cross-system work | Major migration, performance redesign, distributed failure analysis, unfamiliar legacy subsystem |
-| `max` / `ultra` | Exceptional ambiguity or very high consequence when supported | Critical architecture review, severe security boundary, repeated failed diagnosis |
+| `low` | Clear, deterministic, low-risk work | Locate symbols, inventory files, mechanical rename, small comment |
+| `medium` | Routine work with familiar patterns | Fix a known bug, add a focused test, small endpoint |
+| `high` | Real uncertainty or multi-component integration risk | Nondeterministic bug, multi-file feature, auth or data-flow review |
+| `xhigh` | Cross-cutting architecture, multi-system reasoning | Major migration, concurrency across services |
+| `max` | Rare: high/xhigh still leaves consequential uncertainty | Repeated failed diagnosis, high-impact design tradeoff |
 
-Choose the lowest effort that can reliably satisfy the acceptance criteria. Escalate when evidence contradicts assumptions, tests repeatedly fail, or the task expands across boundaries. Do not use `max` or `ultra` by default.
+The Agent tool accepts `model` but has no effort parameter: a subagent inherits the session effort or the effort in its agent definition. Choose the model to control cost, and state the intended depth in the prompt (for example "quick lookup, no deep analysis"). The efforts above apply to the leader session (changed by the user) and to agent definitions that set `effort`.
 
-Use only reasoning efforts exposed for the selected model. The current runtime offers `low`, `medium`, `high`, `xhigh`, `max`, and `ultra` for Astra and Sol; Luna supports up to `max`.
+Start at the lowest effort likely to meet the acceptance criteria. Raise it only on new evidence (repeated failures, contradicted assumptions), not because more files are involved. Support varies by model (for example `xhigh` and `max` may be missing on smaller models): use only efforts the selected model exposes, and fall back to the next lower level, ordinarily `high`, when one is unavailable. Do not assume a level is supported without checking the model picker.
 
 ## Delegation decision
 
-Delegate only when all are true:
+Delegate only when all hold:
 
 1. The output is independently describable and reviewable.
-2. Relevant context can be supplied without transferring project leadership.
+2. Context can be supplied without transferring leadership.
 3. File ownership is non-overlapping, or the task is findings-only.
-4. Parallel work saves time or specialist attention improves quality.
-5. The Sol lead can verify the result before integration.
+4. Parallelism or specialist attention saves more than the added prompt, coordination, and review cost.
+5. The leader can verify the result before integration.
 
-Keep work with Sol when it determines architecture, changes a shared contract, is too small to justify coordination, depends on rapidly changing local state, or cannot be independently verified. Consult Astra for unusually high complexity or consequences while keeping integration ownership with Sol.
+Keep work with the leader when it sets architecture, changes a shared contract, is too small to justify coordination, depends on fast-changing local state, or cannot be verified independently. Consult Opus for unusually high complexity while the leader keeps integration ownership.
 
-## Default routing examples
+## Token and context control
+
+- Do simple, localized, or mechanical work directly rather than delegating.
+- Reuse findings already in the conversation; read a file once and revisit only changed parts.
+- Batch related searches into one findings-only assignment; avoid duplicate agents and duplicate reviews.
+- Keep prompts and reports compact: cite paths and line numbers, do not paste whole files.
+- Filter command output to relevant lines; broaden or rerun only when evidence requires it.
+
+## Default routing
 
 | Task | Model | Effort |
 | --- | --- | --- |
-| Inspect repository structure and identify test commands | gpt-6-luna | low |
-| Implement an isolated CRUD module with established patterns | gpt-6-sol | medium |
-| Add regression tests for a known bug | gpt-6-sol | medium |
-| Diagnose an intermittent race across services | gpt-6-astra | high or xhigh |
-| Design a database migration with rollback and compatibility | gpt-6-sol, with Astra consultation for unusual risk | xhigh |
-| Review integrated changes against acceptance criteria | gpt-6-sol | high |
+| Find affected paths and test commands | haiku or leader | low |
+| Mechanical edit or formatting | leader; haiku only if it saves effort | low |
+| Isolated CRUD module with established patterns | sonnet | medium |
+| Known bug plus regression test | sonnet | medium |
+| Multi-component feature | sonnet | high |
+| Intermittent race across services | sonnet lead, opus consult | xhigh |
+| Migration with rollback and compatibility | sonnet, opus consult for tradeoffs | xhigh |
+| Review integrated changes against criteria | sonnet | high |
+| Critical decision unresolved after Opus | fable | max |
 
 ## Quality gates
 
-Require the leader to reject or revise delegated work when it:
+Reject or revise delegated work that:
 
 - changes files outside scope without necessity;
 - lacks requested tests or evidence;
 - conflicts with repository instructions or architecture;
 - introduces an unhandled error, compatibility break, or security regression;
-- relies on an assumption that the leader cannot validate;
+- rests on an assumption the leader cannot validate;
 - reports completion without an inspectable artifact or reproducible finding.
