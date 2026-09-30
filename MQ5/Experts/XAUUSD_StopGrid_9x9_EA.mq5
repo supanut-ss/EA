@@ -15,6 +15,7 @@ CTrade trade;
 #define MAX_TRADE_SESSIONS_PER_WEEK (7 * MAX_TRADE_SESSIONS_PER_DAY)
 #define TRAIL_ACTIVATION_LEVEL 3
 #define TRAIL_STEP_PRICE 1.0
+#define GAP_SAFETY_RETRY_SECONDS 2
 
 enum ENUM_GRID_LOT_MODE
   {
@@ -1875,10 +1876,10 @@ void ForceCloseGappedStops()
         {
          Print("StopGrid9: gap-safety close failed for position #", ticket,
                " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
-         int retryDelay = InpRetrySeconds;
-         if(retryDelay < 5)
-            retryDelay = 5;
-         g_gapSafetyRetryAfter = TimeCurrent() + retryDelay;
+         // Deliberately short and independent of InpRetrySeconds: a gapped position has
+         // no protection until this succeeds, so back off just enough to stop hammering
+         // the broker during a transient freeze, not the 30s+ used for routine retries.
+         g_gapSafetyRetryAfter = TimeCurrent() + GAP_SAFETY_RETRY_SECONDS;
         }
      }
   }
