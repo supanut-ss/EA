@@ -1573,11 +1573,44 @@ bool HasOwnPositionAtLevel(const int direction, const int level)
   }
 
 //+------------------------------------------------------------------+
+// A 3-x case (1/2/3) is decided the instant Level 3 fills, from the opposite side's
+// fill count at that moment - but the opposite side's own pending orders are still live
+// at that point (only canceled once the main side reaches its target level), so a
+// pullback can fill another opposite-side level afterwards without the case ever
+// re-checking. Upgrade the case (never downgrade) to match the opposite side's current
+// fill count so the TP/SL target level keeps pace with what actually filled. The
+// Level 5 case (caseId 4) has its own separate detection/is left alone here - it is the
+// ceiling of this progression.
+void ReevaluateFixedCaseForOppositeFills()
+  {
+   if(g_fixedCaseId < 1 || g_fixedCaseId > 3 ||
+      (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
+      return;
+
+   int oppositeSidePositions = CountOwnPositionsByDirection(-g_fixedCaseDirection);
+   int newCaseId = oppositeSidePositions;
+   if(newCaseId < 1)
+      newCaseId = 1;
+   if(newCaseId > 3)
+      newCaseId = 3;
+   if(newCaseId <= g_fixedCaseId)
+      return;
+
+   Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(newCaseId),
+         " after the opposite side filled another level (now ", oppositeSidePositions, ").");
+   g_fixedCaseId = newCaseId;
+   if(g_stateKey != "")
+      GlobalVariableSet(FixedCaseKey(), (double)g_fixedCaseId);
+  }
+
+//+------------------------------------------------------------------+
 void ManageConfiguredCase()
   {
    if(g_anchorPrice <= 0.0 || g_fixedCaseId < 1 || g_fixedCaseId > 4 ||
       (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
       return;
+
+   ReevaluateFixedCaseForOppositeFills();
 
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
