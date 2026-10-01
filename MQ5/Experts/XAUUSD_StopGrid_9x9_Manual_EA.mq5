@@ -1603,6 +1603,9 @@ void EvaluateThirdLevelCase(const int direction)
 
    int sameSidePositions = CountOwnPositionsByDirection(direction);
    int oppositeSidePositions = CountOwnPositionsByDirection(-direction);
+   if(sameSidePositions < 3 && oppositeSidePositions == 0)
+      return;   // L03 fill not settled yet; re-check silently on the next tick.
+
    Print("StopGrid9: L03 fill detected; open-position counts=", sameSidePositions, "-", oppositeSidePositions);
    // Price may already have run past 3 same-side levels by the time this is read; the case
    // is still picked from the opposite side's count, and ManageConfiguredCase closes the
@@ -1612,13 +1615,6 @@ void EvaluateThirdLevelCase(const int direction)
       g_level3Evaluated = true;
       ActivateConfiguredCase(oppositeSidePositions, direction);
       GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
-      return;
-     }
-
-   if(sameSidePositions < 3 && oppositeSidePositions == 0)
-     {
-      Print("StopGrid9: L03 fill seen but only ", sameSidePositions,
-            " same-side position(s) settled so far; will re-check on the next tick.");
       return;
      }
 

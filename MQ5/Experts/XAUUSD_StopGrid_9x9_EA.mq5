@@ -93,6 +93,8 @@ bool     g_level3Evaluated = false;
 int      g_fixedCaseId = 0;
 int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
+bool     g_fixedCaseClosing = false;
+bool     g_trailingClosing = false;
 datetime g_pendingCancelRetryAfter = 0;
 datetime g_gapSafetyRetryAfter = 0;
 string   g_stateKey = "";
@@ -910,6 +912,8 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseId = 0;
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
+   g_fixedCaseClosing = false;
+   g_trailingClosing = false;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_cycleHadFilledPosition = false;
@@ -1365,8 +1369,14 @@ void EvaluateThirdLevelCase(const int direction)
 
    int sameSidePositions = CountOwnPositionsByDirection(direction);
    int oppositeSidePositions = CountOwnPositionsByDirection(-direction);
+   if(sameSidePositions < 3 && oppositeSidePositions == 0)
+      return;   // L03 fill not settled yet; re-check silently on the next tick.
+
    Print("StopGrid9: L03 fill detected; open-position counts=", sameSidePositions, "-", oppositeSidePositions);
-   if(sameSidePositions == 3 && oppositeSidePositions >= 1 && oppositeSidePositions <= 3)
+   // Price may already have run past 3 same-side levels by the time this is read; the case
+   // is still picked from the opposite side's count, and ManageConfiguredCase closes the
+   // basket right away if the main side is already beyond that case's target level.
+   if(sameSidePositions >= 3 && oppositeSidePositions >= 1 && oppositeSidePositions <= 3)
      {
       g_level3Evaluated = true;
       ActivateConfiguredCase(oppositeSidePositions, direction);
@@ -1374,24 +1384,23 @@ void EvaluateThirdLevelCase(const int direction)
       return;
      }
 
-   if(sameSidePositions < 3 && oppositeSidePositions == 0)
-     {
-      Print("StopGrid9: L03 fill seen but only ", sameSidePositions,
-            " same-side position(s) settled so far; will re-check on the next tick.");
-      return;
-     }
-
-   if(sameSidePositions != 3 || oppositeSidePositions != 0)
+   // Same side already past 3 positions (price skipped levels) with nothing on the
+   // opposite side is still a 3-0 situation: trail it.
+   if(sameSidePositions >= 3 && oppositeSidePositions == 0)
      {
       g_level3Evaluated = true;
+      ActivateTrailing(direction);
       GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
-      Print("StopGrid9: level 3 filled but the open-position counts do not match a configured 3-x case.");
       return;
      }
 
+   // Any other combination (e.g. 4-4, where the opposite side has more than 3 fills) is
+   // not a configured case: leave every position running, since the opposite side may
+   // still win. Later logic (5-4 detection, opposite mode, TP) keeps managing the grid.
    g_level3Evaluated = true;
-   ActivateTrailing(direction);
    GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
+   Print("StopGrid9: level 3 filled but the open-position counts ", sameSidePositions, "-",
+         oppositeSidePositions, " do not match a configured case; leaving positions open.");
   }
 
 //+------------------------------------------------------------------+
@@ -1612,8 +1621,31 @@ void ManageConfiguredCase()
 
    ReevaluateFixedCaseForOppositeFills();
 
+   // The broker's own TP/SL only closes the main side; once it has, sweep the leftover
+   // opposite-side positions instead of waiting for a price check that no longer runs.
+   if(g_fixedCaseClosing ||
+      (CountOwnPositionsByDirection(g_fixedCaseDirection) == 0 &&
+       CountOwnPositionsByDirection(-g_fixedCaseDirection) > 0))
+     {
+      RetryCloseCaseBasket(g_fixedCaseClosing ?
+                           "close already triggered; sweeping leftover positions" :
+                           "main side already closed by broker TP/SL");
+      return;
+     }
+
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
    int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
+
+   // Main side already filled a level beyond this case's target: the target is behind
+   // us and in profit, so close everything now instead of chasing a further target.
+   for(int level = targetLevel + 1; level <= InpLevelsPerSide; level++)
+     {
+      if(HasOwnPositionAtLevel(g_fixedCaseDirection, level))
+        {
+         RetryCloseCaseBasket("main side already filled past the case target level");
+         return;
+        }
+     }
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
                                        (LevelDistance(targetLevel) + InpCaseExitBufferPrice));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
@@ -1787,10 +1819,14 @@ void RetryCloseCaseBasket(const string reason)
    // GAP_SAFETY_RETRY_SECONDS: whichever side of this basket hasn't closed yet has no
    // SL of its own, so a stuck close here must retry fast, not wait 30s+.
    g_fixedCaseCloseRetryAfter = TimeCurrent() + GAP_SAFETY_RETRY_SECONDS;
+   // Latch: once a close is triggered, keep sweeping every retry until flat, even if
+   // price pulls back or a late pending fill (e.g. Level 4) appears mid-close.
+   g_fixedCaseClosing = true;
+   // Remove pendings first so nothing can fill while the baskets are closing.
+   DeleteAllOwnPending();
    Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), "; ", reason,
          "; closing both the main-side and opposite-side baskets together.");
-   ClosePositionsByDirection(g_fixedCaseDirection);
-   ClosePositionsByDirection(-g_fixedCaseDirection);
+   CloseAllOwnPositions();
   }
 
 //+------------------------------------------------------------------+
@@ -1816,6 +1852,18 @@ void ActivateTrailing(const int detectedDirection)
       Print("StopGrid9: 3-0 pending cancellation requested; own pending orders ",
             pendingBefore, " -> ", CountOwnPendingOrders());
      }
+   // Level 3 is the trailing trigger: the moment its position is gone (SL hit), close
+   // every remaining position regardless of P/L (latched, retried until flat).
+   if(g_trailingClosing ||
+      (CountOwnPositionsByDirection(g_trailingDirection) +
+       CountOwnPositionsByDirection(-g_trailingDirection) > 0 &&
+       !HasOwnPositionAtLevel(g_trailingDirection, TRAIL_ACTIVATION_LEVEL)))
+     {
+      g_trailingClosing = true;
+      DeleteAllOwnPending();
+      CloseAllOwnPositions();
+      return;
+     }
    ManageTrailingStops(g_trailingDirection);
   }
 
@@ -1832,13 +1880,20 @@ void ManageTrailingStops(const int direction)
    double currentPrice = (direction > 0 ? tick.bid : tick.ask);
    double activationPrice = g_anchorPrice + direction * LevelDistance(TRAIL_ACTIVATION_LEVEL);
    double favorableMove = direction * (currentPrice - activationPrice);
+   // The initial stop is level 1 plus $1.00; once price is beyond level 3 it trails
+   // $1.00 (to just under $2.00) behind the current price, advancing in $1.00 steps.
+   double initialDistance = LevelDistance(1) + InpTrailStepPrice;
    int trailSteps = 0;
    if(favorableMove > 0.0)
-      trailSteps = (int)MathFloor(favorableMove / InpTrailStepPrice + 0.000000001);
-
-   // The initial stop is level 1 plus $1.00; each $1.00 beyond level 3 advances it by $1.00.
+     {
+      double priceDistance = direction * (currentPrice - g_anchorPrice);
+      trailSteps = (int)MathFloor((priceDistance - initialDistance - InpTrailStepPrice) /
+                                  InpTrailStepPrice + 0.000000001);
+      if(trailSteps < 0)
+         trailSteps = 0;
+     }
    double targetStop = NormalizePrice(g_anchorPrice + direction *
-                                      (LevelDistance(1) + InpTrailStepPrice + trailSteps * InpTrailStepPrice));
+                                      (initialDistance + trailSteps * InpTrailStepPrice));
    bool hasPosition = false;
    bool hasExistingStop = false;
    double strongestStop = 0.0;
@@ -1878,9 +1933,18 @@ void ManageTrailingStops(const int direction)
          targetStop = MathMin(targetStop, strongestStop);
      }
 
-   // Exit is left entirely to the broker-side SL set below (PositionModify), not a
-   // manual price-cross close here: racing our own market-close against the broker's
-   // own stop trigger caused duplicate-request failures and could delay the exit.
+   // Price pulled back to the trailing SL: close every position (both sides) right away
+   // instead of waiting on each position's own broker SL. Latched in g_trailingClosing.
+   if((direction > 0 && currentPrice <= targetStop) ||
+      (direction < 0 && currentPrice >= targetStop))
+     {
+      g_trailingClosing = true;
+      Print("StopGrid9: trailing SL ", DoubleToString(targetStop, _Digits),
+            " reached; closing all positions.");
+      DeleteAllOwnPending();
+      CloseAllOwnPositions();
+      return;
+     }
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
@@ -2145,6 +2209,8 @@ void ClearSavedAnchor()
    g_fixedCaseId = 0;
    g_fixedCaseDirection = 0;
    g_fixedCaseCloseRetryAfter = 0;
+   g_fixedCaseClosing = false;
+   g_trailingClosing = false;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
