@@ -95,6 +95,7 @@ int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
 bool     g_fixedCaseClosing = false;
 bool     g_trailingClosing = false;
+bool     g_trailingRequiresL3 = true;   // false when 3-0 was detected by count after L3 was already stopped out
 datetime g_pendingCancelRetryAfter = 0;
 datetime g_gapSafetyRetryAfter = 0;
 string   g_stateKey = "";
@@ -914,6 +915,7 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseCloseRetryAfter = 0;
    g_fixedCaseClosing = false;
    g_trailingClosing = false;
+   g_trailingRequiresL3 = true;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_cycleHadFilledPosition = false;
@@ -1339,7 +1341,18 @@ int DetectThirdLevelDirection()
          direction = positionDirection;
         }
      }
-   return(direction);
+   if(direction != 0)
+      return(direction);
+
+   // The L3 position may already be gone (stopped at the anchor) while later levels keep
+   // filling on one side; judge by the same-side fill count so those fills are not ignored.
+   int buys = CountOwnPositionsByDirection(1);
+   int sells = CountOwnPositionsByDirection(-1);
+   if(buys >= 3 && buys >= sells)
+      return(1);
+   if(sells >= 3 && sells > buys)
+      return(-1);
+   return(0);
   }
 
 //+------------------------------------------------------------------+
@@ -1389,6 +1402,8 @@ void EvaluateThirdLevelCase(const int direction)
    if(sameSidePositions >= 3 && oppositeSidePositions == 0)
      {
       g_level3Evaluated = true;
+      if(!HasOwnPositionAtLevel(direction, TRAIL_ACTIVATION_LEVEL))
+         g_trailingRequiresL3 = false;
       ActivateTrailing(direction);
       GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
       return;
@@ -1855,7 +1870,8 @@ void ActivateTrailing(const int detectedDirection)
    // Level 3 is the trailing trigger: the moment its position is gone (SL hit), close
    // every remaining position regardless of P/L (latched, retried until flat).
    if(g_trailingClosing ||
-      (CountOwnPositionsByDirection(g_trailingDirection) +
+      (g_trailingRequiresL3 &&
+       CountOwnPositionsByDirection(g_trailingDirection) +
        CountOwnPositionsByDirection(-g_trailingDirection) > 0 &&
        !HasOwnPositionAtLevel(g_trailingDirection, TRAIL_ACTIVATION_LEVEL)))
      {
@@ -2211,6 +2227,7 @@ void ClearSavedAnchor()
    g_fixedCaseCloseRetryAfter = 0;
    g_fixedCaseClosing = false;
    g_trailingClosing = false;
+   g_trailingRequiresL3 = true;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
