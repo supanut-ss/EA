@@ -50,7 +50,6 @@ input bool                InpAutoRearmAfterCycle = true;
 input int                 InpRearmDelaySeconds   = 5;
 
 input group "=== Exits and Execution ==="
-input double              InpStopLossBeyondAnchor = 0.0;       // 0 places Buy SL / Sell SL at the anchor.
 input double              InpTakeProfitBeyondLast = 2.0;        // Extra distance past the 9th level; default target is anchor +/- $20.
 input double              InpMaxSpreadPrice      = 0.20;       // 0 disables the spread filter.
 input int                 InpSlippagePoints      = 100;
@@ -62,7 +61,7 @@ input double              InpCaseExitBufferPrice = 0.5;        // Extra distance
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
-input double              InpMaxRiskPercent      = 0.0;        // Reject the grid when modeled conservative anchor-stop risk exceeds this % of equity; 0 disables.
+input double              InpMaxRiskPercent      = 0.0;        // Reject the grid when the modeled pullback-to-anchor loss exceeds this % of equity; 0 disables.
 input double              InpRiskSlipBufferPrice = 0.05;       // Extra adverse close-price buffer used only by the risk estimate.
 input double              InpMinMarginLevelPct   = 300.0;      // Projected margin level after all pending orders fill; 0 disables.
 input int                 InpRetrySeconds        = 30;
@@ -541,7 +540,7 @@ int OnInit()
        InpRSIBuyBelow >= InpRSISellAbove ||
        InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
        InpGridStepPrice <= 0.0 || InpFirstLevelDistance <= 0.0 || InpFirstLevelLot <= 0.0 ||
-       InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
+       InpTakeProfitBeyondLast <= 0.0 ||
        InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
        InpSlippagePoints < 0 || InpMinutesBeforeSessionClose < 1 ||
        InpMaxAdverseEntrySlippagePrice < 0.0 ||
@@ -903,7 +902,7 @@ bool StartGrid(const int gridDirection)
          " | grid=", (gridDirection > 0 ? "BUY-only" : (gridDirection < 0 ? "SELL-only" : "both sides")),
          " | step=", DoubleToString(InpGridStepPrice, 2), " | base lot=", DoubleToString(InpFirstLevelLot, VolumeDigits()),
          " | lot mode=", LotModeName(),
-         " | modeled conservative anchor-stop risk=", DoubleToString(modeledRisk, 2), " ", AccountInfoString(ACCOUNT_CURRENCY),
+         " | modeled pullback-to-anchor risk=", DoubleToString(modeledRisk, 2), " ", AccountInfoString(ACCOUNT_CURRENCY),
          " | projected margin=", DoubleToString(projectedMargin, 2), " ", AccountInfoString(ACCOUNT_CURRENCY),
          " | projected margin level=", DoubleToString(projectedMarginLevel, 1), "%");
 
@@ -941,7 +940,7 @@ bool StartGrid(const int gridDirection)
          double requestedLot = LotForLevel(level);
          double lot = NormalizeVolumeDown(requestedLot);
          double entryPrice = NormalizePrice(anchor + direction * LevelDistance(level));
-         double slPrice = NormalizePrice(anchor - direction * InpStopLossBeyondAnchor);
+         double slPrice = 0.0; // no SL up front - the case logic assigns one once Level 3 resolves.
          double tpPrice = NormalizePrice(anchor + direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast));
          datetime expiration = 0;
          ENUM_ORDER_TYPE_TIME timeType = ORDER_TIME_GTC;
@@ -1036,14 +1035,12 @@ bool PreflightGrid(const double anchor,
          return(false);
         }
 
-      double buySl = NormalizePrice(anchor - InpStopLossBeyondAnchor);
-      double sellSl = NormalizePrice(anchor + InpStopLossBeyondAnchor);
       double buyTp = NormalizePrice(anchor + LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast);
       double sellTp = NormalizePrice(anchor - LevelDistance(InpLevelsPerSide) - InpTakeProfitBeyondLast);
-      if((includeBuy && ((buyEntry - buySl) < minStopDistance || (buyTp - buyEntry) < minStopDistance)) ||
-         (includeSell && ((sellSl - sellEntry) < minStopDistance || (sellEntry - sellTp) < minStopDistance)))
+      if((includeBuy && (buyTp - buyEntry) < minStopDistance) ||
+         (includeSell && (sellEntry - sellTp) < minStopDistance))
         {
-         Print("StopGrid9: one or more SL/TP levels violate the broker's minimum stop distance.");
+         Print("StopGrid9: one or more TP levels violate the broker's minimum stop distance.");
          return(false);
         }
 
@@ -1051,8 +1048,10 @@ bool PreflightGrid(const double anchor,
       double sellProfitAtStop = 0.0;
       double buyRequiredMargin = 0.0;
       double sellRequiredMargin = 0.0;
-      double buyRiskExit = buySl - InpRiskSlipBufferPrice;
-      double sellRiskExit = sellSl + InpRiskSlipBufferPrice;
+      // No SL is placed up front; model the loss if every level on a side fills and price
+      // pulls back to the anchor (the case logic's first protective line).
+      double buyRiskExit = anchor - InpRiskSlipBufferPrice;
+      double sellRiskExit = anchor + InpRiskSlipBufferPrice;
 
       if((includeBuy && !OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, lot, buyEntry, buyRiskExit, buyProfitAtStop)) ||
          (includeSell && !OrderCalcProfit(ORDER_TYPE_SELL, _Symbol, lot, sellEntry, sellRiskExit, sellProfitAtStop)))
@@ -1087,7 +1086,7 @@ bool PreflightGrid(const double anchor,
       double riskPercent = 100.0 * modeledRisk / equity;
       if(riskPercent > InpMaxRiskPercent)
         {
-         Print("StopGrid9: modeled conservative anchor-stop risk is ", DoubleToString(riskPercent, 2),
+         Print("StopGrid9: modeled pullback-to-anchor risk is ", DoubleToString(riskPercent, 2),
                "% of equity, above the ", DoubleToString(InpMaxRiskPercent, 2), "% limit. Reduce the base lot or raise the risk limit deliberately.");
          return(false);
         }
@@ -1231,6 +1230,16 @@ bool HasOwnActivity()
   }
 
 //+------------------------------------------------------------------+
+// Level number from an order/position comment such as "SG9|B|L03"; 0 when absent.
+int LevelFromComment(const string comment)
+  {
+   int pos = StringFind(comment, "|L");
+   if(pos < 0)
+      return(0);
+   return((int)StringToInteger(StringSubstr(comment, pos + 2, 2)));
+  }
+
+//+------------------------------------------------------------------+
 double RecoverAnchorPrice()
   {
    if(g_stateKey != "" && GlobalVariableCheck(g_stateKey))
@@ -1240,15 +1249,23 @@ double RecoverAnchorPrice()
          return(NormalizePrice(saved));
      }
 
+   // No SL is placed up front, so rebuild the anchor from a level's entry price and the
+   // level number in its comment. A pending order sits exactly on its level; a filled
+   // position may carry slippage, so prefer the exact anchor implied by its untouched
+   // original TP when that agrees with the entry, else fall back to the entry price.
+   double positionAnchor = 0.0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
          (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
          continue;
-      double sl = OrderGetDouble(ORDER_SL);
-      if(sl > 0.0)
-         return(NormalizePrice(sl));
+      int level = LevelFromComment(OrderGetString(ORDER_COMMENT));
+      ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      int direction = (orderType == ORDER_TYPE_BUY_STOP ? 1 : (orderType == ORDER_TYPE_SELL_STOP ? -1 : 0));
+      if(level < 1 || direction == 0)
+         continue;
+      return(NormalizePrice(OrderGetDouble(ORDER_PRICE_OPEN) - direction * LevelDistance(level)));
      }
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -1257,10 +1274,23 @@ double RecoverAnchorPrice()
       if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
          (ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
          continue;
-      double sl = PositionGetDouble(POSITION_SL);
-      if(sl > 0.0)
-         return(NormalizePrice(sl));
+      int level = LevelFromComment(PositionGetString(POSITION_COMMENT));
+      int direction = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? 1 : -1);
+      if(level < 1)
+         continue;
+      double fromEntry = PositionGetDouble(POSITION_PRICE_OPEN) - direction * LevelDistance(level);
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      if(takeProfit > 0.0)
+        {
+         double fromTp = takeProfit - direction * (LevelDistance(InpLevelsPerSide) + InpTakeProfitBeyondLast);
+         if(MathAbs(fromTp - fromEntry) <= InpGridStepPrice)
+            return(NormalizePrice(fromTp));
+        }
+      if(positionAnchor <= 0.0)
+         positionAnchor = fromEntry;
      }
+   if(positionAnchor > 0.0)
+      return(NormalizePrice(positionAnchor));
 
    return(0.0);
   }
