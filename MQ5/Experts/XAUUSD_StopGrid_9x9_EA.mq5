@@ -57,7 +57,7 @@ input int                 InpExpirationHours     = 0;          // 0 means GTC.
 input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
 input double              InpMaxAdverseEntrySlippagePrice = 2.0; // 0 disables the gap-fill guard; otherwise flatten if a stop fill slips this far beyond its trigger.
 input double              InpTrailStepPrice      = 1.0;        // 3-0 trailing stop's initial offset and per-$ advance step.
-input double              InpCaseExitBufferPrice = 0.5;        // Distance added to a fixed case's target (TP) price beyond its level; may be negative (> -grid step).
+input double              InpCaseExitBufferPrice = -0.1;       // Distance added to a fixed case's target (TP) price beyond its level; may be negative (> -grid step).
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
