@@ -62,7 +62,7 @@ input int                 InpExpirationHours     = 0;          // 0 means GTC.
 input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
 input double              InpMaxAdverseEntrySlippagePrice = 2.0; // 0 disables the gap-fill guard; otherwise flatten if a stop fill slips this far beyond its trigger.
 input double              InpTrailStepPrice      = 1.0;        // 3-0 trailing stop's initial offset and per-$ advance step.
-input double              InpCaseExitBufferPrice = 0.5;        // Extra distance added to a fixed case's target (TP) price beyond its level.
+input double              InpCaseExitBufferPrice = 0.5;        // Distance added to a fixed case's target (TP) price beyond its level; may be negative (> -grid step).
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
@@ -553,7 +553,7 @@ int OnInit()
        InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
        InpSlippagePoints < 0 || InpMinutesBeforeSessionClose < 1 ||
        InpMaxAdverseEntrySlippagePrice < 0.0 ||
-       InpTrailStepPrice <= 0.0 || InpCaseExitBufferPrice <= 0.0 ||
+       InpTrailStepPrice <= 0.0 || InpCaseExitBufferPrice <= -InpGridStepPrice ||
       InpMaxRiskPercent < 0.0 || InpRiskSlipBufferPrice < 0.0 ||
       InpMinMarginLevelPct < 0.0 || InpRetrySeconds < 1 ||
       InpRearmDelaySeconds < 0 ||
@@ -1831,6 +1831,21 @@ void ReevaluateFixedCaseForOppositeFills()
       return;
 
    int oppositeSidePositions = CountOwnPositionsByDirection(-g_fixedCaseDirection);
+
+   // A 3-x case later pushed to 5 main-side fills against 4 opposite fills is the 5-4 case:
+   // DetectFifthLevelDirection never runs while a case is active, so promote it here.
+   if(HasOwnPositionAtLevel(g_fixedCaseDirection, 5) &&
+      CountOwnPositionsByDirection(g_fixedCaseDirection) == 5 &&
+      oppositeSidePositions == 4)
+     {
+      Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(4),
+            " after the main side reached Level 5 against 4 opposite fills.");
+      g_fixedCaseId = 4;
+      if(g_stateKey != "")
+         GlobalVariableSet(FixedCaseKey(), (double)g_fixedCaseId);
+      return;
+     }
+
    int newCaseId = oppositeSidePositions;
    if(newCaseId < 1)
       newCaseId = 1;
@@ -1905,7 +1920,7 @@ void ManageConfiguredCase()
       return;
      }
 
-   SetConfiguredCaseTakeProfit(g_fixedCaseDirection, targetPrice);
+   SetConfiguredCaseTakeProfit(g_fixedCaseDirection, targetPrice, targetLevel);
 
    if(!HasOwnPositionAtLevel(g_fixedCaseDirection, targetLevel))
       return;
@@ -1946,7 +1961,7 @@ bool AllMainPositionsHaveCaseTakeProfit(const int direction, const double target
   }
 
 //+------------------------------------------------------------------+
-void SetConfiguredCaseTakeProfit(const int direction, const double targetPrice)
+void SetConfiguredCaseTakeProfit(const int direction, const double targetPrice, const int targetLevel)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -1957,6 +1972,10 @@ void SetConfiguredCaseTakeProfit(const int direction, const double targetPrice)
       ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       if((direction > 0 && positionType != POSITION_TYPE_BUY) ||
          (direction < 0 && positionType != POSITION_TYPE_SELL))
+         continue;
+
+      // The target-level position gets no case TP; the basket close at targetPrice exits it.
+      if(StringFind(PositionGetString(POSITION_COMMENT), StringFormat("|L%02d", targetLevel)) >= 0)
          continue;
 
       double stopLoss = PositionGetDouble(POSITION_SL);
