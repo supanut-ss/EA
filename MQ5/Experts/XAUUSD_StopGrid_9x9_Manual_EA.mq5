@@ -2294,6 +2294,44 @@ void ForceCloseGappedStops()
   }
 
 //+------------------------------------------------------------------+
+// The broker rejects (retcode 10029 "frozen") any modify/close/cancel on a position or
+// order whose SL/TP/entry sits within SYMBOL_TRADE_FREEZE_LEVEL of the market. The
+// position's own SL/TP fires server-side in that zone, so skip it and retry next time
+// instead of sending a request that is certain to be rejected.
+bool IsWithinFreezeLevel(const double distance)
+  {
+   double freezeDistance = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * _Point;
+   return(freezeDistance > 0.0 && distance >= 0.0 && distance <= freezeDistance);
+  }
+
+//+------------------------------------------------------------------+
+// Operates on the currently selected position.
+bool IsSelectedPositionFrozen()
+  {
+   double stopLoss = PositionGetDouble(POSITION_SL);
+   double takeProfit = PositionGetDouble(POSITION_TP);
+   if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      return((stopLoss > 0.0 && IsWithinFreezeLevel(bid - stopLoss)) ||
+             (takeProfit > 0.0 && IsWithinFreezeLevel(takeProfit - bid)));
+     }
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   return((stopLoss > 0.0 && IsWithinFreezeLevel(stopLoss - ask)) ||
+          (takeProfit > 0.0 && IsWithinFreezeLevel(ask - takeProfit)));
+  }
+
+//+------------------------------------------------------------------+
+// Operates on the currently selected pending order (Buy Stop / Sell Stop).
+bool IsSelectedOrderFrozen()
+  {
+   double entryPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+   if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP)
+      return(IsWithinFreezeLevel(entryPrice - SymbolInfoDouble(_Symbol, SYMBOL_ASK)));
+   return(IsWithinFreezeLevel(SymbolInfoDouble(_Symbol, SYMBOL_BID) - entryPrice));
+  }
+
+//+------------------------------------------------------------------+
 void ClosePositionsByDirection(const int direction)
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2306,6 +2344,8 @@ void ClosePositionsByDirection(const int direction)
       ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       if((direction > 0 && positionType != POSITION_TYPE_BUY) ||
          (direction < 0 && positionType != POSITION_TYPE_SELL))
+         continue;
+      if(IsSelectedPositionFrozen())
          continue;
 
       bool requestSent = trade.PositionClose(ticket);
@@ -2370,7 +2410,7 @@ void DeleteAllOwnPending(const bool keepRecoveryOrder = false)
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
          (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
-         (keepRecoveryOrder && IsRecoveryKeptOrder()))
+         (keepRecoveryOrder && IsRecoveryKeptOrder()) || IsSelectedOrderFrozen())
          continue;
       bool requestSent = trade.OrderDelete(ticket);
       if(!TradeResultAccepted(requestSent, true))
@@ -2407,7 +2447,7 @@ void CloseAllOwnPositions()
      {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         !IsOwnPosition(ticket))
+         !IsOwnPosition(ticket) || IsSelectedPositionFrozen())
          continue;
       bool requestSent = trade.PositionClose(ticket);
       if(!TradeResultAccepted(requestSent, false))
