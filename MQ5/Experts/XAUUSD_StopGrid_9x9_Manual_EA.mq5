@@ -18,6 +18,8 @@ CTrade trade;
 #define MAX_TRADE_SESSIONS_PER_DAY 64
 #define MAX_TRADE_SESSIONS_PER_WEEK (7 * MAX_TRADE_SESSIONS_PER_DAY)
 #define TRAIL_ACTIVATION_LEVEL 3
+#define RECOVERY_KEEP_LEVEL 4   // trend-side pending kept alive after the 3-3 recovery switch
+#define RECOVERY_TP_LEVEL 7     // every trend-side position's TP after the 3-3 recovery switch
 #define GAP_SAFETY_RETRY_SECONDS 2
 
 enum ENUM_GRID_LOT_MODE
@@ -99,6 +101,7 @@ int      g_fixedCaseDirection = 0;
 datetime g_fixedCaseCloseRetryAfter = 0;
 bool     g_fixedCaseClosing = false;
 bool     g_trailingClosing = false;
+bool     g_recoveryMode = false;
 datetime g_pendingCancelRetryAfter = 0;
 datetime g_gapSafetyRetryAfter = 0;
 ulong    g_manualTicket = 0;
@@ -610,11 +613,13 @@ int OnInit()
      }
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
       g_level3Evaluated = (GlobalVariableGet(ThirdLevelResolvedKey()) > 0.5);
+   if(GlobalVariableCheck(RecoveryKey()))
+      g_recoveryMode = (GlobalVariableGet(RecoveryKey()) > 0.5 && g_trailingDirection != 0);
    if(GlobalVariableCheck(FixedCaseKey()))
      {
       int savedCaseId = (int)GlobalVariableGet(FixedCaseKey());
       int savedCaseDirection = (int)GlobalVariableGet(FixedCaseDirectionKey());
-      if(savedCaseId >= 1 && savedCaseId <= 4 &&
+      if(savedCaseId >= 1 && savedCaseId <= 2 &&
          (savedCaseDirection == 1 || savedCaseDirection == -1))
         {
          g_fixedCaseId = savedCaseId;
@@ -992,6 +997,7 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
    g_fixedCaseCloseRetryAfter = 0;
    g_fixedCaseClosing = false;
    g_trailingClosing = false;
+   g_recoveryMode = false;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_cycleHadFilledPosition = false;
@@ -999,6 +1005,8 @@ bool ArmGridFromManual(const ulong manualTicket, const int manualDirection,
       GlobalVariableDel(TrailingDirectionKey());
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
       GlobalVariableDel(ThirdLevelResolvedKey());
+   if(GlobalVariableCheck(RecoveryKey()))
+      GlobalVariableDel(RecoveryKey());
    if(GlobalVariableCheck(FixedCaseKey()))
       GlobalVariableDel(FixedCaseKey());
    if(GlobalVariableCheck(FixedCaseDirectionKey()))
@@ -1124,6 +1132,7 @@ bool StartGrid(const int gridDirection)
    g_fixedCaseCloseRetryAfter = 0;
    g_fixedCaseClosing = false;
    g_trailingClosing = false;
+   g_recoveryMode = false;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_cycleHadFilledPosition = false;
@@ -1131,6 +1140,8 @@ bool StartGrid(const int gridDirection)
       GlobalVariableDel(TrailingDirectionKey());
    if(GlobalVariableCheck(ThirdLevelResolvedKey()))
       GlobalVariableDel(ThirdLevelResolvedKey());
+   if(GlobalVariableCheck(RecoveryKey()))
+      GlobalVariableDel(RecoveryKey());
    if(GlobalVariableCheck(FixedCaseKey()))
       GlobalVariableDel(FixedCaseKey());
    if(GlobalVariableCheck(FixedCaseDirectionKey()))
@@ -1610,7 +1621,7 @@ void EvaluateThirdLevelCase(const int direction)
    // Price may already have run past 3 same-side levels by the time this is read; the case
    // is still picked from the opposite side's count, and ManageConfiguredCase closes the
    // basket right away if the main side is already beyond that case's target level.
-   if(sameSidePositions >= 3 && oppositeSidePositions >= 1 && oppositeSidePositions <= 3)
+   if(sameSidePositions >= 3 && oppositeSidePositions >= 1 && oppositeSidePositions <= 2)
      {
       g_level3Evaluated = true;
       ActivateConfiguredCase(oppositeSidePositions, direction);
@@ -1628,9 +1639,9 @@ void EvaluateThirdLevelCase(const int direction)
       return;
      }
 
-   // Any other combination (e.g. 4-4, where the opposite side has more than 3 fills) is
+   // Any other combination (e.g. 3-3, where the opposite side has 3+ fills) is
    // not a configured case: leave every position running, since the opposite side may
-   // still win. Later logic (5-4 detection, opposite mode, TP) keeps managing the grid.
+   // still win. Later logic (opposite mode, TP) keeps managing the grid.
    g_level3Evaluated = true;
    GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
    Print("StopGrid9: level 3 filled but the open-position counts ", sameSidePositions, "-",
@@ -1703,41 +1714,13 @@ void ManageGridExitRules()
       return;
      }
 
-   int fifthLevelDirection = DetectFifthLevelDirection();
-   if(fifthLevelDirection != 0)
-     {
-      ActivateConfiguredCase(4, fifthLevelDirection);
-      ManageConfiguredCase();
-      return;
-     }
-
    ApplyOppositeMode();
-  }
-
-//+------------------------------------------------------------------+
-int DetectFifthLevelDirection()
-  {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         !IsOwnPosition(ticket) ||
-         StringFind(PositionGetString(POSITION_COMMENT), "|L05") < 0)
-         continue;
-
-      ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      int direction = (positionType == POSITION_TYPE_BUY ? 1 : -1);
-      if(CountOwnPositionsByDirection(direction) == 5 &&
-         CountOwnPositionsByDirection(-direction) == 4)
-         return(direction);
-     }
-   return(0);
   }
 
 //+------------------------------------------------------------------+
 void ActivateConfiguredCase(const int caseId, const int direction)
   {
-   if(caseId < 1 || caseId > 4 || (direction != 1 && direction != -1))
+   if(caseId < 1 || caseId > 2 || (direction != 1 && direction != -1))
       return;
    if(g_trailingDirection != 0 || g_fixedCaseId != 0)
       return;
@@ -1759,10 +1742,6 @@ int ConfiguredCaseTargetLevel(const int caseId)
       return(4);
    if(caseId == 2)
       return(5);
-   if(caseId == 3)
-      return(7);
-   if(caseId == 4)
-      return(9);
    return(0);
   }
 
@@ -1773,10 +1752,6 @@ int ConfiguredCaseStopLevel(const int caseId)
       return(3);
    if(caseId == 2)
       return(4);
-   if(caseId == 3)
-      return(6);
-   if(caseId == 4)
-      return(8);
    return(0);
   }
 
@@ -1787,10 +1762,6 @@ string FixedCaseName(const int caseId)
       return("3-1");
    if(caseId == 2)
       return("3-2");
-   if(caseId == 3)
-      return("3-3");
-   if(caseId == 4)
-      return("5-4");
    return("unknown");
   }
 
@@ -1816,47 +1787,22 @@ bool HasOwnPositionAtLevel(const int direction, const int level)
   }
 
 //+------------------------------------------------------------------+
-// A 3-x case (1/2/3) is decided the instant Level 3 fills, from the opposite side's
-// fill count at that moment - but the opposite side's own pending orders are still live
-// at that point (only canceled once the main side reaches its target level), so a
-// pullback can fill another opposite-side level afterwards without the case ever
-// re-checking. Upgrade the case (never downgrade) to match the opposite side's current
-// fill count so the TP/SL target level keeps pace with what actually filled. The
-// Level 5 case (caseId 4) has its own separate detection/is left alone here - it is the
-// ceiling of this progression.
+// The case (3-1 / 3-2) is decided the instant Level 3 fills, but the opposite side's
+// pending orders are still live then, so a pullback can fill another opposite level
+// afterwards. Upgrade 3-1 to 3-2 (never downgrade) so the TP/SL levels keep pace.
 void ReevaluateFixedCaseForOppositeFills()
   {
-   if(g_fixedCaseId < 1 || g_fixedCaseId > 3 ||
+   if(g_fixedCaseId != 1 ||
       (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
       return;
 
    int oppositeSidePositions = CountOwnPositionsByDirection(-g_fixedCaseDirection);
-
-   // A 3-x case later pushed to 5 main-side fills against 4 opposite fills is the 5-4 case:
-   // DetectFifthLevelDirection never runs while a case is active, so promote it here.
-   if(HasOwnPositionAtLevel(g_fixedCaseDirection, 5) &&
-      CountOwnPositionsByDirection(g_fixedCaseDirection) == 5 &&
-      oppositeSidePositions == 4)
-     {
-      Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(4),
-            " after the main side reached Level 5 against 4 opposite fills.");
-      g_fixedCaseId = 4;
-      if(g_stateKey != "")
-         GlobalVariableSet(FixedCaseKey(), (double)g_fixedCaseId);
-      return;
-     }
-
-   int newCaseId = oppositeSidePositions;
-   if(newCaseId < 1)
-      newCaseId = 1;
-   if(newCaseId > 3)
-      newCaseId = 3;
-   if(newCaseId <= g_fixedCaseId)
+   if(oppositeSidePositions < 2)
       return;
 
-   Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(newCaseId),
+   Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(2),
          " after the opposite side filled another level (now ", oppositeSidePositions, ").");
-   g_fixedCaseId = newCaseId;
+   g_fixedCaseId = 2;
    if(g_stateKey != "")
       GlobalVariableSet(FixedCaseKey(), (double)g_fixedCaseId);
   }
@@ -1864,7 +1810,7 @@ void ReevaluateFixedCaseForOppositeFills()
 //+------------------------------------------------------------------+
 void ManageConfiguredCase()
   {
-   if(g_anchorPrice <= 0.0 || g_fixedCaseId < 1 || g_fixedCaseId > 4 ||
+   if(g_anchorPrice <= 0.0 || g_fixedCaseId < 1 || g_fixedCaseId > 2 ||
       (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
       return;
 
@@ -1879,6 +1825,12 @@ void ManageConfiguredCase()
       RetryCloseCaseBasket(g_fixedCaseClosing ?
                            "close already triggered; sweeping leftover positions" :
                            "main side already closed by broker TP/SL");
+      return;
+     }
+
+   if(ShouldStartRecoveryTrailing())
+     {
+      StartRecoveryTrailing();
       return;
      }
 
@@ -2084,6 +2036,41 @@ void RetryCloseCaseBasket(const string reason)
   }
 
 //+------------------------------------------------------------------+
+// A 3-x case whose main side stopped at Level 3 (no Level 4) while the opposite side has
+// since filled 3 levels is a 3-3: the main side is closed and the opposite ("trend")
+// side continues as a 3-0 with its Level 4 pending kept and a Level 7 TP.
+bool ShouldStartRecoveryTrailing()
+  {
+   if(g_recoveryMode || g_fixedCaseId == 0 ||
+      (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
+      return(false);
+   return(HasOwnPositionAtLevel(g_fixedCaseDirection, TRAIL_ACTIVATION_LEVEL) &&
+          !HasOwnPositionAtLevel(g_fixedCaseDirection, RECOVERY_KEEP_LEVEL) &&
+          CountOwnPositionsByDirection(-g_fixedCaseDirection) >= TRAIL_ACTIVATION_LEVEL);
+  }
+
+//+------------------------------------------------------------------+
+void StartRecoveryTrailing()
+  {
+   int trendDirection = -g_fixedCaseDirection;
+   Print("StopGrid9: 3-3 reached with the main side below Level ", RECOVERY_KEEP_LEVEL,
+         "; closing the main side and continuing the ", (trendDirection > 0 ? "Buy" : "Sell"),
+         " side as 3-0 (Level ", RECOVERY_KEEP_LEVEL, " pending kept, TP at Level ", RECOVERY_TP_LEVEL, ").");
+   g_recoveryMode = true;
+   if(g_stateKey != "")
+     {
+      GlobalVariableSet(RecoveryKey(), 1.0);
+      if(GlobalVariableCheck(FixedCaseKey()))
+         GlobalVariableDel(FixedCaseKey());
+      if(GlobalVariableCheck(FixedCaseDirectionKey()))
+         GlobalVariableDel(FixedCaseDirectionKey());
+     }
+   g_fixedCaseId = 0;
+   g_fixedCaseDirection = 0;
+   ActivateTrailing(trendDirection);
+  }
+
+//+------------------------------------------------------------------+
 void ActivateTrailing(const int detectedDirection)
   {
    if(g_trailingDirection == 0)
@@ -2099,13 +2086,15 @@ void ActivateTrailing(const int detectedDirection)
    if(g_trailingDirection == 0)
       return;
 
-   int pendingBefore = CountOwnPendingOrders();
+   int pendingBefore = CountOwnPendingOrders(g_recoveryMode);
    if(pendingBefore > 0 && PendingCancelRetryDue())
      {
-      DeleteAllOwnPending();
+      DeleteAllOwnPending(g_recoveryMode);
       Print("StopGrid9: 3-0 pending cancellation requested; own pending orders ",
-            pendingBefore, " -> ", CountOwnPendingOrders());
+            pendingBefore, " -> ", CountOwnPendingOrders(g_recoveryMode));
      }
+   if(g_recoveryMode && CountOwnPositionsByDirection(-g_trailingDirection) > 0)
+      ClosePositionsByDirection(-g_trailingDirection);
    // Level 3 is the trailing trigger: the moment its position is gone (SL hit), close
    // every remaining position regardless of P/L (latched, retried until flat).
    if(g_trailingClosing ||
@@ -2165,6 +2154,10 @@ void ManageTrailingStops(const int direction)
          continue;
 
       hasPosition = true;
+      // The recovery Level 4 position runs on its own stop (see below), not the shared one.
+      if(g_recoveryMode && StringFind(PositionGetString(POSITION_COMMENT),
+                                      StringFormat("|L%02d", RECOVERY_KEEP_LEVEL)) >= 0)
+         continue;
       double oldStop = PositionGetDouble(POSITION_SL);
       if(oldStop <= 0.0)
          continue;
@@ -2211,21 +2204,45 @@ void ManageTrailingStops(const int direction)
          (direction < 0 && positionType != POSITION_TYPE_SELL))
          continue;
 
+      double positionStop = targetStop;
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      if(g_recoveryMode)
+        {
+         // Recovery 3-0: every position takes a Level 7 TP; the Level 4 position keeps its
+         // stop at Level 3 until price is a trail step past Level 4, then trails like the rest.
+         if(StringFind(PositionGetString(POSITION_COMMENT),
+                       StringFormat("|L%02d", RECOVERY_KEEP_LEVEL)) >= 0 &&
+            direction * (currentPrice - g_anchorPrice) <
+            EffectiveLevelDistance(direction, RECOVERY_KEEP_LEVEL) + InpTrailStepPrice)
+            positionStop = NormalizePrice(g_anchorPrice + direction *
+                                          EffectiveLevelDistance(direction, TRAIL_ACTIVATION_LEVEL));
+         double recoveryTp = NormalizePrice(g_anchorPrice + direction *
+                                            EffectiveLevelDistance(direction, RECOVERY_TP_LEVEL));
+         if(MathAbs(takeProfit - recoveryTp) > g_tickSize * 0.5)
+           {
+            bool tpSent = trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), recoveryTp);
+            if(TradeResultAccepted(tpSent, false))
+               takeProfit = recoveryTp;
+            else
+               Print("StopGrid9: failed to set recovery TP for position #", ticket,
+                     " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+           }
+        }
+
       double oldStop = PositionGetDouble(POSITION_SL);
       bool tighten = (oldStop <= 0.0 ||
-                      (direction > 0 && targetStop > oldStop + g_tickSize * 0.5) ||
-                      (direction < 0 && targetStop < oldStop - g_tickSize * 0.5));
+                      (direction > 0 && positionStop > oldStop + g_tickSize * 0.5) ||
+                      (direction < 0 && positionStop < oldStop - g_tickSize * 0.5));
       if(!tighten)
          continue;
 
-      double takeProfit = PositionGetDouble(POSITION_TP);
-      bool requestSent = trade.PositionModify(ticket, targetStop, takeProfit);
+      bool requestSent = trade.PositionModify(ticket, positionStop, takeProfit);
       if(TradeResultAccepted(requestSent, false))
          Print("StopGrid9: trailing SL moved for position #", ticket, " from ",
-               DoubleToString(oldStop, _Digits), " to ", DoubleToString(targetStop, _Digits));
+               DoubleToString(oldStop, _Digits), " to ", DoubleToString(positionStop, _Digits));
       else
          Print("StopGrid9: failed to update trailing SL for position #", ticket,
-               " to ", DoubleToString(targetStop, _Digits), " | retcode=", trade.ResultRetcode(),
+               " to ", DoubleToString(positionStop, _Digits), " | retcode=", trade.ResultRetcode(),
                " ", trade.ResultRetcodeDescription());
      }
   }
@@ -2334,14 +2351,26 @@ bool PendingCancelRetryDue()
   }
 
 //+------------------------------------------------------------------+
-void DeleteAllOwnPending()
+// True for the one pending order a recovery 3-0 keeps alive: the trend side's Level 4 stop.
+bool IsRecoveryKeptOrder()
+  {
+   if(!g_recoveryMode || g_trailingDirection == 0 ||
+      StringFind(OrderGetString(ORDER_COMMENT), StringFormat("|L%02d", RECOVERY_KEEP_LEVEL)) < 0)
+      return(false);
+   ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   return(g_trailingDirection > 0 ? orderType == ORDER_TYPE_BUY_STOP : orderType == ORDER_TYPE_SELL_STOP);
+  }
+
+//+------------------------------------------------------------------+
+void DeleteAllOwnPending(const bool keepRecoveryOrder = false)
   {
    bool anyFailed = false;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
-         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
+         (keepRecoveryOrder && IsRecoveryKeptOrder()))
          continue;
       bool requestSent = trade.OrderDelete(ticket);
       if(!TradeResultAccepted(requestSent, true))
@@ -2356,14 +2385,15 @@ void DeleteAllOwnPending()
   }
 
 //+------------------------------------------------------------------+
-int CountOwnPendingOrders()
+int CountOwnPendingOrders(const bool skipRecoveryOrder = false)
   {
    int count = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
-         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber)
+         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
+         (skipRecoveryOrder && IsRecoveryKeptOrder()))
          continue;
       count++;
      }
@@ -2432,6 +2462,12 @@ string ThirdLevelResolvedKey()
   }
 
 //+------------------------------------------------------------------+
+string RecoveryKey()
+  {
+   return(g_stateKey + ".RV");
+  }
+
+//+------------------------------------------------------------------+
 string FixedCaseKey()
   {
    return(g_stateKey + ".C");
@@ -2470,6 +2506,8 @@ void ClearSavedAnchor()
       GlobalVariableDel(TrailingDirectionKey());
    if(g_stateKey != "" && GlobalVariableCheck(ThirdLevelResolvedKey()))
       GlobalVariableDel(ThirdLevelResolvedKey());
+   if(GlobalVariableCheck(RecoveryKey()))
+      GlobalVariableDel(RecoveryKey());
    if(g_stateKey != "" && GlobalVariableCheck(FixedCaseKey()))
       GlobalVariableDel(FixedCaseKey());
    if(g_stateKey != "" && GlobalVariableCheck(FixedCaseDirectionKey()))
@@ -2489,6 +2527,7 @@ void ClearSavedAnchor()
    g_fixedCaseCloseRetryAfter = 0;
    g_fixedCaseClosing = false;
    g_trailingClosing = false;
+   g_recoveryMode = false;
    g_pendingCancelRetryAfter = 0;
    g_gapSafetyRetryAfter = 0;
    g_gapGuardPending = false;
