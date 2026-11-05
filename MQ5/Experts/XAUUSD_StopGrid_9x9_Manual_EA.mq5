@@ -45,9 +45,9 @@ input bool                InpUseM5EMAFilter      = true;
 input int                 InpTrendEMAPeriod      = 50;
 
 input group "=== Grid Setup ==="
-input int                 InpLevelsPerSide       = 9;          // Buy Stop and Sell Stop levels on each side.
-input double              InpGridStepPrice       = 2.0;        // Price distance per level; 2.0 means $2.00, independent of _Point.
-input double              InpFirstLevelDistance  = 2.0;        // Distance from anchor to level 1; levels 2+ still add InpGridStepPrice each.
+input int                 InpLevelsPerSide       = 4;          // Buy Stop and Sell Stop levels on each side (min 4: the 3-1 case targets Level 4).
+input double              InpGridStepPrice       = 3.0;        // Price distance per level; 3.0 means $3.00, independent of _Point.
+input double              InpFirstLevelDistance  = 3.0;        // Distance from anchor to level 1; levels 2+ still add InpGridStepPrice each.
 input double              InpFirstLevelLot       = 0.01;       // Level 1 lot; the opposite side's level 1 always matches it.
 input ENUM_GRID_LOT_MODE  InpLotMode             = GRID_LOT_ODD_MULTIPLIER;
 input string              InpCustomLotSequence  = "0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01"; // One lot per level; level 1 must match InpFirstLevelLot.
@@ -64,7 +64,8 @@ input int                 InpExpirationHours     = 0;          // 0 means GTC.
 input int                 InpMinutesBeforeSessionClose = 15;   // Liquidate this many minutes before each symbol trade-session close.
 input double              InpMaxAdverseEntrySlippagePrice = 2.0; // 0 disables the gap-fill guard; otherwise flatten if a stop fill slips this far beyond its trigger.
 input double              InpTrailStepPrice      = 1.0;        // 3-0 trailing stop's initial offset and per-$ advance step.
-input double              InpCaseExitBufferPrice = -0.1;       // Distance added to a fixed case's target (TP) price beyond its level; may be negative (> -grid step).
+input double              InpCaseExitBufferPrice = -0.1;       // Distance added to the 3-1 target price beyond Level 4; may be negative (> -grid step). Reaching it closes the opposite side and starts trailing.
+input int                 InpCaseStopLevel       = 2;          // 3-1 emergency SL sits at this main-side level (1-2); crossing it closes the whole basket.
 input ulong               InpMagicNumber         = 20260925;
 
 input group "=== Risk Guards ==="
@@ -550,7 +551,8 @@ int OnInit()
        InpADXStrongTrendThreshold <= 0.0 || InpADXStrongTrendThreshold >= 100.0 ||
        InpRSIBuyBelow <= 0.0 || InpRSISellAbove >= 100.0 ||
        InpRSIBuyBelow >= InpRSISellAbove ||
-       InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
+       InpLevelsPerSide < 4 || InpLevelsPerSide > MAX_GRID_LEVELS ||
+       InpCaseStopLevel < 1 || InpCaseStopLevel >= TRAIL_ACTIVATION_LEVEL ||
        InpGridStepPrice <= 0.0 || InpFirstLevelDistance <= 0.0 || InpFirstLevelLot <= 0.0 ||
        InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
        InpMaxSpreadPrice < 0.0 || InpExpirationHours < 0 ||
@@ -619,7 +621,7 @@ int OnInit()
      {
       int savedCaseId = (int)GlobalVariableGet(FixedCaseKey());
       int savedCaseDirection = (int)GlobalVariableGet(FixedCaseDirectionKey());
-      if(savedCaseId >= 1 && savedCaseId <= 2 &&
+      if(savedCaseId == 1 &&
          (savedCaseDirection == 1 || savedCaseDirection == -1))
         {
          g_fixedCaseId = savedCaseId;
@@ -1621,10 +1623,10 @@ void EvaluateThirdLevelCase(const int direction)
    // Price may already have run past 3 same-side levels by the time this is read; the case
    // is still picked from the opposite side's count, and ManageConfiguredCase closes the
    // basket right away if the main side is already beyond that case's target level.
-   if(sameSidePositions >= 3 && oppositeSidePositions >= 1 && oppositeSidePositions <= 2)
+   if(sameSidePositions >= 3 && oppositeSidePositions == 1)
      {
       g_level3Evaluated = true;
-      ActivateConfiguredCase(oppositeSidePositions, direction);
+      ActivateConfiguredCase(1, direction);
       GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
       return;
      }
@@ -1639,13 +1641,13 @@ void EvaluateThirdLevelCase(const int direction)
       return;
      }
 
-   // Any other combination (e.g. 3-3, where the opposite side has 3+ fills) is
-   // not a configured case: leave every position running, since the opposite side may
-   // still win. Later logic (opposite mode, TP) keeps managing the grid.
-   g_level3Evaluated = true;
-   GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
-   Print("StopGrid9: level 3 filled but the open-position counts ", sameSidePositions, "-",
-         oppositeSidePositions, " do not match a configured case; leaving positions open.");
+   // Only 3-0 and 3-1 are played. Any other combination (3-2, 3-3, ...) is flattened;
+   // g_level3Evaluated stays false so the close is retried every tick until nothing is left.
+   Print("StopGrid9: level 3 filled with open-position counts ", sameSidePositions, "-",
+         oppositeSidePositions, "; only 3-0 and 3-1 are played, closing the basket.");
+   if(CountOwnPendingOrders() > 0 && PendingCancelRetryDue())
+      DeleteAllOwnPending();
+   CloseAllOwnPositions();
   }
 
 //+------------------------------------------------------------------+
@@ -1720,7 +1722,7 @@ void ManageGridExitRules()
 //+------------------------------------------------------------------+
 void ActivateConfiguredCase(const int caseId, const int direction)
   {
-   if(caseId < 1 || caseId > 2 || (direction != 1 && direction != -1))
+   if(caseId != 1 || (direction != 1 && direction != -1))
       return;
    if(g_trailingDirection != 0 || g_fixedCaseId != 0)
       return;
@@ -1732,37 +1734,25 @@ void ActivateConfiguredCase(const int caseId, const int direction)
    GlobalVariableSet(ThirdLevelResolvedKey(), 1.0);
    g_level3Evaluated = true;
    Print("StopGrid9: case ", FixedCaseName(caseId), " activated on ",
-         (direction > 0 ? "Buy" : "Sell"), "; setting the main-side TP.");
+         (direction > 0 ? "Buy" : "Sell"), "; setting the main-side SL.");
   }
 
 //+------------------------------------------------------------------+
 int ConfiguredCaseTargetLevel(const int caseId)
   {
-   if(caseId == 1)
-      return(4);
-   if(caseId == 2)
-      return(5);
-   return(0);
+   return(caseId == 1 ? 4 : 0);
   }
 
 //+------------------------------------------------------------------+
 int ConfiguredCaseStopLevel(const int caseId)
   {
-   if(caseId == 1)
-      return(3);
-   if(caseId == 2)
-      return(4);
-   return(0);
+   return(caseId == 1 ? InpCaseStopLevel : 0);
   }
 
 //+------------------------------------------------------------------+
 string FixedCaseName(const int caseId)
   {
-   if(caseId == 1)
-      return("3-1");
-   if(caseId == 2)
-      return("3-2");
-   return("unknown");
+   return(caseId == 1 ? "3-1" : "unknown");
   }
 
 //+------------------------------------------------------------------+
@@ -1787,36 +1777,16 @@ bool HasOwnPositionAtLevel(const int direction, const int level)
   }
 
 //+------------------------------------------------------------------+
-// The case (3-1 / 3-2) is decided the instant Level 3 fills, but the opposite side's
-// pending orders are still live then, so a pullback can fill another opposite level
-// afterwards. Upgrade 3-1 to 3-2 (never downgrade) so the TP/SL levels keep pace.
-void ReevaluateFixedCaseForOppositeFills()
-  {
-   if(g_fixedCaseId != 1 ||
-      (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
-      return;
-
-   int oppositeSidePositions = CountOwnPositionsByDirection(-g_fixedCaseDirection);
-   if(oppositeSidePositions < 2)
-      return;
-
-   Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " upgraded to ", FixedCaseName(2),
-         " after the opposite side filled another level (now ", oppositeSidePositions, ").");
-   g_fixedCaseId = 2;
-   if(g_stateKey != "")
-      GlobalVariableSet(FixedCaseKey(), (double)g_fixedCaseId);
-  }
-
-//+------------------------------------------------------------------+
+// 3-1: emergency SL at the main side's InpCaseStopLevel closes the whole basket. Once price
+// reaches the Level 4 target the opposite side is closed and the main side keeps running
+// under the same trailing stop as 3-0.
 void ManageConfiguredCase()
   {
-   if(g_anchorPrice <= 0.0 || g_fixedCaseId < 1 || g_fixedCaseId > 2 ||
+   if(g_anchorPrice <= 0.0 || g_fixedCaseId != 1 ||
       (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
       return;
 
-   ReevaluateFixedCaseForOppositeFills();
-
-   // The broker's own TP/SL only closes the main side; once it has, sweep the leftover
+   // The broker's own SL only closes the main side; once it has, sweep the leftover
    // opposite-side positions instead of waiting for a price check that no longer runs.
    if(g_fixedCaseClosing ||
       (CountOwnPositionsByDirection(g_fixedCaseDirection) == 0 &&
@@ -1824,34 +1794,18 @@ void ManageConfiguredCase()
      {
       RetryCloseCaseBasket(g_fixedCaseClosing ?
                            "close already triggered; sweeping leftover positions" :
-                           "main side already closed by broker TP/SL");
+                           "main side already closed by broker SL");
       return;
      }
 
-   if(ShouldStartRecoveryTrailing())
-     {
-      StartRecoveryTrailing();
-      return;
-     }
+   // Opposite pendings would only ever turn 3-1 into the unplayed 3-2 / 3-3, so drop them.
+   DeleteOppositePending(g_fixedCaseDirection);
 
    int targetLevel = ConfiguredCaseTargetLevel(g_fixedCaseId);
-   int stopLevel = ConfiguredCaseStopLevel(g_fixedCaseId);
-
-   // Main side already filled a level beyond this case's target: the target is behind
-   // us and in profit, so close everything now instead of chasing a further target.
-   for(int level = targetLevel + 1; level <= InpLevelsPerSide; level++)
-     {
-      if(HasOwnPositionAtLevel(g_fixedCaseDirection, level))
-        {
-         RetryCloseCaseBasket("main side already filled past the case target level");
-         return;
-        }
-     }
-
    double targetPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
                                        (EffectiveLevelDistance(g_fixedCaseDirection, targetLevel) + InpCaseExitBufferPrice));
    double stopPrice = NormalizePrice(g_anchorPrice + g_fixedCaseDirection *
-                                     (EffectiveLevelDistance(g_fixedCaseDirection, stopLevel) + InpTrailStepPrice));
+                                     EffectiveLevelDistance(g_fixedCaseDirection, ConfiguredCaseStopLevel(g_fixedCaseId)));
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
@@ -1861,89 +1815,59 @@ void ManageConfiguredCase()
                                                      currentPrice <= targetPrice);
    if(targetReached)
      {
-      int pendingBeforeTarget = CountOwnPendingOrders();
-      if(pendingBeforeTarget > 0 && PendingCancelRetryDue())
-         DeleteAllOwnPending();
-      // Close both baskets together right when the target is touched, rather than
-      // waiting on each main-side position's own TP order to fill independently (which
-      // left the opposite-side basket open with no SL of its own for however long that
-      // took, or indefinitely if a TP modify had failed).
-      RetryCloseCaseBasket("target price reached");
+      StartCaseTrailing();
       return;
      }
 
-   SetConfiguredCaseTakeProfit(g_fixedCaseDirection, targetPrice, targetLevel);
-
-   if(!HasOwnPositionAtLevel(g_fixedCaseDirection, targetLevel))
-      return;
-
-   int pendingBefore = CountOwnPendingOrders();
-   if(pendingBefore > 0 && PendingCancelRetryDue())
-     {
-      DeleteAllOwnPending();
-      Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " target L",
-            targetLevel, " filled; deleting pending orders ", pendingBefore,
-            " -> ", CountOwnPendingOrders());
-     }
    SetConfiguredCaseStopLoss(g_fixedCaseDirection, stopPrice);
   }
 
 //+------------------------------------------------------------------+
-bool AllMainPositionsHaveCaseTakeProfit(const int direction, const double targetPrice)
+// Hands the 3-1 basket over to the 3-0 trailing stop: ActivateTrailing cancels the
+// remaining pendings and closes the opposite-side positions.
+void StartCaseTrailing()
   {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   int direction = g_fixedCaseDirection;
+   Print("StopGrid9: case ", FixedCaseName(g_fixedCaseId), " target reached; closing the ",
+         (direction > 0 ? "Sell" : "Buy"), " side and trailing the ",
+         (direction > 0 ? "Buy" : "Sell"), " side as 3-0.");
+   g_fixedCaseId = 0;
+   g_fixedCaseDirection = 0;
+   if(g_stateKey != "")
      {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         !IsOwnPosition(ticket))
-         continue;
-      ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      if((direction > 0 && positionType != POSITION_TYPE_BUY) ||
-         (direction < 0 && positionType != POSITION_TYPE_SELL))
-         continue;
-
-      double takeProfit = PositionGetDouble(POSITION_TP);
-      bool protectedByTarget = (direction > 0 ?
-                                (takeProfit > 0.0 && takeProfit <= targetPrice + g_tickSize * 0.5) :
-                                (takeProfit > 0.0 && takeProfit >= targetPrice - g_tickSize * 0.5));
-      if(!protectedByTarget)
-         return(false);
+      if(GlobalVariableCheck(FixedCaseKey()))
+         GlobalVariableDel(FixedCaseKey());
+      if(GlobalVariableCheck(FixedCaseDirectionKey()))
+         GlobalVariableDel(FixedCaseDirectionKey());
      }
-   return(true);
+   ActivateTrailing(direction);
   }
 
 //+------------------------------------------------------------------+
-void SetConfiguredCaseTakeProfit(const int direction, const double targetPrice, const int targetLevel)
+void DeleteOppositePending(const int mainDirection)
   {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   ENUM_ORDER_TYPE typeToDelete = (mainDirection > 0 ? ORDER_TYPE_SELL_STOP : ORDER_TYPE_BUY_STOP);
+   bool retryChecked = false;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || PositionGetString(POSITION_SYMBOL) != _Symbol ||
-         !IsOwnPosition(ticket))
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || OrderGetString(ORDER_SYMBOL) != _Symbol ||
+         (ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber ||
+         (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != typeToDelete ||
+         IsSelectedOrderFrozen())
          continue;
-      ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      if((direction > 0 && positionType != POSITION_TYPE_BUY) ||
-         (direction < 0 && positionType != POSITION_TYPE_SELL))
-         continue;
-
-      // The target-level position gets no case TP; the basket close at targetPrice exits it.
-      if(StringFind(PositionGetString(POSITION_COMMENT), StringFormat("|L%02d", targetLevel)) >= 0)
-         continue;
-
-      double stopLoss = PositionGetDouble(POSITION_SL);
-      double takeProfit = PositionGetDouble(POSITION_TP);
-      if(takeProfit > 0.0 && MathAbs(takeProfit - targetPrice) <= g_tickSize * 0.5)
-         continue;
-      bool requestSent = trade.PositionModify(ticket, stopLoss, targetPrice);
-      if(TradeResultAccepted(requestSent, false))
-         Print("StopGrid9: case TP set for position #", ticket, " to ",
-               DoubleToString(targetPrice, _Digits));
-      else
-         Print("StopGrid9: failed to set case TP for position #", ticket,
+      if(!retryChecked)
+        {
+         if(!PendingCancelRetryDue())
+            return;
+         retryChecked = true;
+        }
+      bool requestSent = trade.OrderDelete(ticket);
+      if(!TradeResultAccepted(requestSent, true))
+         Print("StopGrid9: failed to cancel opposite pending order #", ticket,
                " | retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
      }
   }
-
 //+------------------------------------------------------------------+
 void SetConfiguredCaseStopLoss(const int direction, const double stopPrice)
   {
@@ -2036,41 +1960,6 @@ void RetryCloseCaseBasket(const string reason)
   }
 
 //+------------------------------------------------------------------+
-// A 3-x case whose main side stopped at Level 3 (no Level 4) while the opposite side has
-// since filled 3 levels is a 3-3: the main side is closed and the opposite ("trend")
-// side continues as a 3-0 with its Level 4 pending kept and a Level 7 TP.
-bool ShouldStartRecoveryTrailing()
-  {
-   if(g_recoveryMode || g_fixedCaseId == 0 ||
-      (g_fixedCaseDirection != 1 && g_fixedCaseDirection != -1))
-      return(false);
-   return(HasOwnPositionAtLevel(g_fixedCaseDirection, TRAIL_ACTIVATION_LEVEL) &&
-          !HasOwnPositionAtLevel(g_fixedCaseDirection, RECOVERY_KEEP_LEVEL) &&
-          CountOwnPositionsByDirection(-g_fixedCaseDirection) >= TRAIL_ACTIVATION_LEVEL);
-  }
-
-//+------------------------------------------------------------------+
-void StartRecoveryTrailing()
-  {
-   int trendDirection = -g_fixedCaseDirection;
-   Print("StopGrid9: 3-3 reached with the main side below Level ", RECOVERY_KEEP_LEVEL,
-         "; closing the main side and continuing the ", (trendDirection > 0 ? "Buy" : "Sell"),
-         " side as 3-0 (Level ", RECOVERY_KEEP_LEVEL, " pending kept, TP at Level ", RECOVERY_TP_LEVEL, ").");
-   g_recoveryMode = true;
-   if(g_stateKey != "")
-     {
-      GlobalVariableSet(RecoveryKey(), 1.0);
-      if(GlobalVariableCheck(FixedCaseKey()))
-         GlobalVariableDel(FixedCaseKey());
-      if(GlobalVariableCheck(FixedCaseDirectionKey()))
-         GlobalVariableDel(FixedCaseDirectionKey());
-     }
-   g_fixedCaseId = 0;
-   g_fixedCaseDirection = 0;
-   ActivateTrailing(trendDirection);
-  }
-
-//+------------------------------------------------------------------+
 void ActivateTrailing(const int detectedDirection)
   {
    if(g_trailingDirection == 0)
@@ -2093,7 +1982,8 @@ void ActivateTrailing(const int detectedDirection)
       Print("StopGrid9: 3-0 pending cancellation requested; own pending orders ",
             pendingBefore, " -> ", CountOwnPendingOrders(g_recoveryMode));
      }
-   if(g_recoveryMode && CountOwnPositionsByDirection(-g_trailingDirection) > 0)
+   // A 3-1 hand-over arrives with the opposite side still open; a plain 3-0 never has any.
+   if(CountOwnPositionsByDirection(-g_trailingDirection) > 0)
       ClosePositionsByDirection(-g_trailingDirection);
    // Level 3 is the trailing trigger: the moment its position is gone (SL hit), close
    // every remaining position regardless of P/L (latched, retried until flat).
