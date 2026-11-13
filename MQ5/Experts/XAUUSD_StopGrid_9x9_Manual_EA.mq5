@@ -45,9 +45,9 @@ input bool                InpUseM5EMAFilter      = true;
 input int                 InpTrendEMAPeriod      = 50;
 
 input group "=== Grid Setup ==="
-input int                 InpLevelsPerSide       = 4;          // Buy Stop and Sell Stop levels on each side (min 4: the 3-1 case targets Level 4).
-input double              InpGridStepPrice       = 3.0;        // Price distance per level; 3.0 means $3.00, independent of _Point.
-input double              InpFirstLevelDistance  = 3.0;        // Distance from anchor to level 1; levels 2+ still add InpGridStepPrice each.
+input int                 InpLevelsPerSide       = 3;          // Buy Stop and Sell Stop levels on each side (min 3; the 3-1 target is a price level, no Level 4 order needed).
+input double              InpGridStepPrice       = 2.0;        // Price distance per level; 2.0 means $2.00, independent of _Point.
+input double              InpFirstLevelDistance  = 2.0;        // Distance from anchor to level 1; levels 2+ still add InpGridStepPrice each.
 input double              InpFirstLevelLot       = 0.01;       // Level 1 lot; the opposite side's level 1 always matches it.
 input ENUM_GRID_LOT_MODE  InpLotMode             = GRID_LOT_ODD_MULTIPLIER;
 input string              InpCustomLotSequence  = "0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01"; // One lot per level; level 1 must match InpFirstLevelLot.
@@ -57,7 +57,7 @@ input int                 InpRearmDelaySeconds   = 5;
 
 input group "=== Exits and Execution ==="
 input double              InpStopLossBeyondAnchor = 0.0;       // 0 places Buy SL / Sell SL at the anchor.
-input double              InpTakeProfitBeyondLast = 2.0;        // Extra distance past the 9th level; default target is anchor +/- $20.
+input double              InpTakeProfitBeyondLast = 16.0;       // Extra distance past the last level; with 3 levels at $2 the broker TP sits near anchor +/- $22 so trailing can run.
 input double              InpMaxSpreadPrice      = 0.20;       // 0 disables the spread filter.
 input int                 InpSlippagePoints      = 100;
 input int                 InpExpirationHours     = 0;          // 0 means GTC.
@@ -551,7 +551,7 @@ int OnInit()
        InpADXStrongTrendThreshold <= 0.0 || InpADXStrongTrendThreshold >= 100.0 ||
        InpRSIBuyBelow <= 0.0 || InpRSISellAbove >= 100.0 ||
        InpRSIBuyBelow >= InpRSISellAbove ||
-       InpLevelsPerSide < 4 || InpLevelsPerSide > MAX_GRID_LEVELS ||
+       InpLevelsPerSide < TRAIL_ACTIVATION_LEVEL || InpLevelsPerSide > MAX_GRID_LEVELS ||
        InpCaseStopLevel < 1 || InpCaseStopLevel >= TRAIL_ACTIVATION_LEVEL ||
        InpGridStepPrice <= 0.0 || InpFirstLevelDistance <= 0.0 || InpFirstLevelLot <= 0.0 ||
        InpStopLossBeyondAnchor < 0.0 || InpTakeProfitBeyondLast <= 0.0 ||
