@@ -60,11 +60,11 @@ input int      InpS2SetupMin       = 840;       // Setup time (minutes)
 input int      InpS2RangeMin       = 120;       // Range length (minutes)
 input int      InpS2CloseMin       = 960;       // Close time (minutes)
 
-input group "=== Setup 3 (early session, default OFF: 00:00 = 07:00 Thai) ==="
-input bool     InpS3Enable         = false;     // Enable
-input int      InpS3SetupMin       = 0;         // Setup time (minutes)
-input int      InpS3RangeMin       = 120;       // Range length (minutes; 22:00-00:00 prior day)
-input int      InpS3CloseMin       = 300;       // Close time (minutes)
+input group "=== Setup 3 (default ON: 07:00 = 14:00 Thai, range 05:00-07:00) ==="
+input bool     InpS3Enable         = true;      // Enable
+input int      InpS3SetupMin       = 420;       // Setup time (minutes)
+input int      InpS3RangeMin       = 120;       // Range length (minutes)
+input int      InpS3CloseMin       = 600;       // Close time (minutes)
 
 input group "=== Setup 4 (default ON: 05:30 = 12:30 Thai, range 03:30-05:30) ==="
 input bool     InpS4Enable         = true;      // Enable
@@ -74,18 +74,19 @@ input int      InpS4CloseMin       = 480;       // Close time (minutes)
 
 input group "=== Entry ==="
 input double   InpEntryBufferPrice = 0.10;      // Distance beyond range edge for the stop orders
+input int      InpOrderExpiryMin   = 60;        // Cancel unfilled stop orders this many minutes after placement (0 = keep until setup close)
 
 input group "=== Risk / Exit ==="
 input ENUM_TIMEFRAMES InpAtrSlTF   = PERIOD_M15; // ATR timeframe for stop distance
 input int      InpAtrSlPeriod      = 14;        // ATR period (stop distance)
 input double   InpAtrSlMult        = 1.5;       // SL cap = this x ATR (SL = min(range width, cap))
 input double   InpMinSlPrice       = 2.0;       // Minimum SL distance (price units)
-input double   InpRiskReward       = 5.0;       // TP = this x SL distance (far cap; trailing does most exits)
+input double   InpRiskReward       = 3.0;       // TP = this x SL distance
 input int      InpDayEndMin        = 960;       // Close everything at/after this time (minutes, 960 = 16:00: before the 21:00 summer break / Friday close and US-holiday early closes seen 16:00-18:00; 0 = off)
 input int      InpCloseBeforeSessionMin = 15;   // Close everything this many minutes before the trade session ends (daily break / weekend; 0 = off)
 input double   InpBreakevenR       = 0.0;       // Move SL to entry once profit reaches this many R (0 = off)
 input double   InpBreakevenLockR   = 0.1;       // ...and lock this many R beyond entry (covers spread)
-input double   InpTrailStartR      = 1.5;       // Start trailing once profit reaches this many R (0 = off)
+input double   InpTrailStartR      = 0.0;       // Start trailing once profit reaches this many R (0 = off; real-tick tests favour the fixed 3R TP)
 input double   InpTrailDistR       = 1.0;       // Trailing SL distance behind price, in R
 
 input group "=== Filters ==="
@@ -317,6 +318,27 @@ void ManageExits()
 }
 
 //+------------------------------------------------------------------+
+//| Late breakouts barely pay after costs: drop stop orders that have |
+//| waited longer than InpOrderExpiryMin. Uses the order's own setup  |
+//| time, so it also works after an EA restart.                       |
+//+------------------------------------------------------------------+
+void CancelExpiredOrders()
+{
+   if(InpOrderExpiryMin <= 0) return;
+   datetime now = TimeCurrent();
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || !OrderSelect(t)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbolName) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(now - (datetime)OrderGetInteger(ORDER_TIME_SETUP) < InpOrderExpiryMin * 60) continue;
+      if(!trade.OrderDelete(t))
+         PrintFormat("Expired order %I64u delete failed: %d", t, trade.ResultRetcode());
+   }
+}
+
+//+------------------------------------------------------------------+
 // A position left over from an earlier day (e.g. a failed close)
 bool HasPositionOpenedBefore(datetime t)
 {
@@ -531,7 +553,8 @@ int OnInit()
    if(InpLotSize <= 0 || InpMaxEntriesPerDay < 1 || InpAtrSlPeriod < 2 || InpAtrFilterPeriod < 2 ||
       InpAtrSlMult <= 0 || InpRiskReward <= 0 || InpMinSlPrice < 0 || InpEntryBufferPrice < 0 ||
       InpDayEndMin < 0 || InpDayEndMin >= 1440 || InpCloseBeforeSessionMin < 0 ||
-      InpBreakevenR < 0 || InpTrailStartR < 0 || (InpTrailStartR > 0 && InpTrailDistR <= 0))
+      InpBreakevenR < 0 || InpTrailStartR < 0 || (InpTrailStartR > 0 && InpTrailDistR <= 0) ||
+      InpOrderExpiryMin < 0)
    {
       Print("Initialization failed: invalid input(s)");
       return INIT_PARAMETERS_INCORRECT;
@@ -606,6 +629,7 @@ void OnTick()
    }
 
    // Count fills and enforce OCO: once a position exists, remove pending orders
+   CancelExpiredOrders();
    ManageExits();
    bool hasPos = HasOpenPosition();
    if(hasPos && !g_posSeen) g_entriesToday++;
