@@ -80,9 +80,13 @@ input ENUM_TIMEFRAMES InpAtrSlTF   = PERIOD_M15; // ATR timeframe for stop dista
 input int      InpAtrSlPeriod      = 14;        // ATR period (stop distance)
 input double   InpAtrSlMult        = 1.5;       // SL cap = this x ATR (SL = min(range width, cap))
 input double   InpMinSlPrice       = 2.0;       // Minimum SL distance (price units)
-input double   InpRiskReward       = 3.0;       // TP = this x SL distance
+input double   InpRiskReward       = 5.0;       // TP = this x SL distance (far cap; trailing does most exits)
 input int      InpDayEndMin        = 960;       // Close everything at/after this time (minutes, 960 = 16:00: before the 21:00 summer break / Friday close and US-holiday early closes seen 16:00-18:00; 0 = off)
 input int      InpCloseBeforeSessionMin = 15;   // Close everything this many minutes before the trade session ends (daily break / weekend; 0 = off)
+input double   InpBreakevenR       = 0.0;       // Move SL to entry once profit reaches this many R (0 = off)
+input double   InpBreakevenLockR   = 0.1;       // ...and lock this many R beyond entry (covers spread)
+input double   InpTrailStartR      = 1.5;       // Start trailing once profit reaches this many R (0 = off)
+input double   InpTrailDistR       = 1.0;       // Trailing SL distance behind price, in R
 
 input group "=== Filters ==="
 input int      InpAtrFilterPeriod  = 14;        // ATR(H1) period for range filter
@@ -258,6 +262,58 @@ bool HasOpenPosition(string tag = "")
       return true;
    }
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Breakeven / trailing. R = initial SL distance, recovered from the |
+//| fixed TP (TP = R x InpRiskReward), so no per-position state.      |
+//+------------------------------------------------------------------+
+void ManageExits()
+{
+   if(InpBreakevenR <= 0 && InpTrailStartR <= 0) return;
+   double tick  = SymbolInfoDouble(symbolName, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(symbolName, SYMBOL_POINT);
+   double minGap = (double)SymbolInfoInteger(symbolName, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double freeze = (double)SymbolInfoInteger(symbolName, SYMBOL_TRADE_FREEZE_LEVEL) * point;
+   minGap = MathMax(minGap, freeze);
+   if(tick <= 0) tick = point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0 || !PositionSelectByTicket(tk)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbolName) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      bool   isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);
+      if(tp <= 0 || InpRiskReward <= 0) continue;
+      double R = MathAbs(tp - open) / InpRiskReward;
+      if(R <= 0) continue;
+
+      double px     = isBuy ? SymbolInfoDouble(symbolName, SYMBOL_BID) : SymbolInfoDouble(symbolName, SYMBOL_ASK);
+      double profit = isBuy ? px - open : open - px;
+      double newSL  = sl;
+
+      if(InpBreakevenR > 0 && profit >= InpBreakevenR * R)
+      {
+         double be = isBuy ? open + InpBreakevenLockR * R : open - InpBreakevenLockR * R;
+         if(isBuy ? (be > newSL) : (newSL <= 0 || be < newSL)) newSL = be;
+      }
+      if(InpTrailStartR > 0 && profit >= InpTrailStartR * R)
+      {
+         double tr = isBuy ? px - InpTrailDistR * R : px + InpTrailDistR * R;
+         if(isBuy ? (tr > newSL) : (newSL <= 0 || tr < newSL)) newSL = tr;
+      }
+
+      newSL = NormalizePriceToTick(newSL, isBuy ? -1 : +1);
+      if(MathAbs(newSL - sl) < tick * 0.5) continue;                 // nothing to change
+      if(isBuy ? (px - newSL <= minGap) : (newSL - px <= minGap)) continue;  // too close to price
+      if(!trade.PositionModify(tk, newSL, tp))
+         PrintFormat("PositionModify %I64u failed: %d", tk, trade.ResultRetcode());
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -474,7 +530,8 @@ int OnInit()
    }
    if(InpLotSize <= 0 || InpMaxEntriesPerDay < 1 || InpAtrSlPeriod < 2 || InpAtrFilterPeriod < 2 ||
       InpAtrSlMult <= 0 || InpRiskReward <= 0 || InpMinSlPrice < 0 || InpEntryBufferPrice < 0 ||
-      InpDayEndMin < 0 || InpDayEndMin >= 1440 || InpCloseBeforeSessionMin < 0)
+      InpDayEndMin < 0 || InpDayEndMin >= 1440 || InpCloseBeforeSessionMin < 0 ||
+      InpBreakevenR < 0 || InpTrailStartR < 0 || (InpTrailStartR > 0 && InpTrailDistR <= 0))
    {
       Print("Initialization failed: invalid input(s)");
       return INIT_PARAMETERS_INCORRECT;
@@ -549,6 +606,7 @@ void OnTick()
    }
 
    // Count fills and enforce OCO: once a position exists, remove pending orders
+   ManageExits();
    bool hasPos = HasOpenPosition();
    if(hasPos && !g_posSeen) g_entriesToday++;
    g_posSeen = hasPos;
