@@ -81,6 +81,8 @@ input int      InpAtrSlPeriod      = 14;        // ATR period (stop distance)
 input double   InpAtrSlMult        = 1.5;       // SL cap = this x ATR (SL = min(range width, cap))
 input double   InpMinSlPrice       = 2.0;       // Minimum SL distance (price units)
 input double   InpRiskReward       = 3.0;       // TP = this x SL distance
+input int      InpDayEndMin        = 960;       // Close everything at/after this time (minutes, 960 = 16:00: before the 21:00 summer break / Friday close and US-holiday early closes seen 16:00-18:00; 0 = off)
+input int      InpCloseBeforeSessionMin = 15;   // Close everything this many minutes before the trade session ends (daily break / weekend; 0 = off)
 
 input group "=== Filters ==="
 input int      InpAtrFilterPeriod  = 14;        // ATR(H1) period for range filter
@@ -159,6 +161,47 @@ datetime DayStart(datetime t)
 }
 
 //+------------------------------------------------------------------+
+//| Minutes until the current trade session ends, -1 if the market   |
+//| is closed now or the session runs on past midnight.              |
+//+------------------------------------------------------------------+
+int MinutesToSessionEnd(datetime now)
+{
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   int secOfDay = dt.hour * 3600 + dt.min * 60 + dt.sec;
+   datetime from, to;
+   for(uint i = 0; SymbolInfoSessionTrade(symbolName, (ENUM_DAY_OF_WEEK)dt.day_of_week, i, from, to); i++)
+   {
+      int f = (int)from, t = (int)to;
+      if(t <= f) t += 86400;                     // session listed as wrapping past midnight
+      if(secOfDay < f || secOfDay >= t) continue;
+      if(t < 86400) return (t - secOfDay) / 60;  // ends today (daily break or weekend close)
+      // Runs to midnight: it only really ends if the next day has no session starting at 00:00
+      int next = (dt.day_of_week + 1) % 7;
+      datetime nf, nt;
+      for(uint j = 0; SymbolInfoSessionTrade(symbolName, (ENUM_DAY_OF_WEEK)next, j, nf, nt); j++)
+         if((int)nf == 0) return -1;
+      return (86400 - secOfDay) / 60;
+   }
+   return -1;
+}
+
+//+------------------------------------------------------------------+
+//| True when nothing may be held: past the day cutoff or about to   |
+//| hit a session end (daily break, weekend).                        |
+//+------------------------------------------------------------------+
+bool MustBeFlat(datetime now, int nowMin)
+{
+   if(InpDayEndMin > 0 && nowMin >= InpDayEndMin) return true;
+   if(InpCloseBeforeSessionMin > 0)
+   {
+      int left = MinutesToSessionEnd(now);
+      if(left >= 0 && left <= InpCloseBeforeSessionMin) return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 double ReadAtr(int handle)
 {
    double buf[1];
@@ -213,6 +256,21 @@ bool HasOpenPosition(string tag = "")
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
       if(tag != "" && StringFind(PositionGetString(POSITION_COMMENT), tag) < 0) continue;
       return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+// A position left over from an earlier day (e.g. a failed close)
+bool HasPositionOpenedBefore(datetime t)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0 || !PositionSelectByTicket(tk)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbolName) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if((datetime)PositionGetInteger(POSITION_TIME) < t) return true;
    }
    return false;
 }
@@ -415,7 +473,8 @@ int OnInit()
       }
    }
    if(InpLotSize <= 0 || InpMaxEntriesPerDay < 1 || InpAtrSlPeriod < 2 || InpAtrFilterPeriod < 2 ||
-      InpAtrSlMult <= 0 || InpRiskReward <= 0 || InpMinSlPrice < 0 || InpEntryBufferPrice < 0)
+      InpAtrSlMult <= 0 || InpRiskReward <= 0 || InpMinSlPrice < 0 || InpEntryBufferPrice < 0 ||
+      InpDayEndMin < 0 || InpDayEndMin >= 1440 || InpCloseBeforeSessionMin < 0)
    {
       Print("Initialization failed: invalid input(s)");
       return INIT_PARAMETERS_INCORRECT;
@@ -470,6 +529,23 @@ void OnTick()
       g_entriesToday = 0;
       g_posSeen = false;
       for(int i = 0; i < NSETUP; i++) g_done[i] = false;
+   }
+
+   // Never hold through a day change or a market close: flatten and stop for the day
+   if(MustBeFlat(now, nowMin) || HasPositionOpenedBefore(today))
+   {
+      if(CountPendingOrders() > 0) CancelPendingOrders();
+      if(HasOpenPosition())
+      {
+         PrintFormat("Force close: day end / session end (%02d:%02d)", dt.hour, dt.min);
+         ClosePositions();
+      }
+      if(MustBeFlat(now, nowMin))
+      {
+         for(int i = 0; i < NSETUP; i++) g_done[i] = true;
+         g_posSeen = HasOpenPosition();
+         return;
+      }
    }
 
    // Count fills and enforce OCO: once a position exists, remove pending orders
